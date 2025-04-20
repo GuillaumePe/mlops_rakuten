@@ -1,0 +1,6 @@
+outs:
+- md5: 948ad064142b26ee739c478585390418.dir
+  size: 167439496
+  nfiles: 6
+  hash: md5
+  path: chunked_text_files
