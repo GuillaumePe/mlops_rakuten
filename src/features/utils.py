@@ -28,7 +28,6 @@ def log_progress(current, total, start_time):
     elapsed = time.time() - start_time
     speed = current / elapsed if elapsed > 0 else 0
     remaining = (total - current) / speed if speed > 0 else float('inf')
-
     print(f"[{current}/{total}] - {speed:.2f} batchs/sec - ETA: {remaining:.1f} sec", end='\r')
 
 
