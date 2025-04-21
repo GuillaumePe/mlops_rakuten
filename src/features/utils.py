@@ -79,7 +79,7 @@ def extract_images_features(input_dir,image_paths,preprocess,model= None):
 
     with torch.no_grad():
         for img_id in image_paths:
-            img_path = os.path.join(input_dir,image_paths)
+            img_path = os.path.join(input_dir,img_id)
             try:
                 image = Image.open(img_path).convert('RGB')
                 input_tensor = preprocess(image).unsqueeze(0)

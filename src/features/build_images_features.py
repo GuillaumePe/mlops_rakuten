@@ -10,16 +10,16 @@ from utils import log_progress, extract_images_features
 # Paramètres
 INPUT_CSV = "/home/ubuntu/mar25_cmlops_rakuten/data/raw_data/X_train.csv"
 LIST_ID_COLUMNS = ["imageid", "productid"]
-IMAGE_FOLDER = "/home/ubuntu/mar25_cmlops_rakuten/data/images/image_train"
+IMAGE_FOLDER = "/home/ubuntu/mar25_cmlops_rakuten/data/raw_data/images/image_train"
 OUTPUT_DIR = "/home/ubuntu/mar25_cmlops_rakuten/data/preprocessed/chunked_image_files"
 
 # Chargement des données et nettoyages
 data_text = pl.read_csv(INPUT_CSV)
 data_text = data_text.select(LIST_ID_COLUMNS).sort(LIST_ID_COLUMNS)
 
-data_image = data_text.with_columns("image_"+pl.col(LIST_ID_COLUMNS[0])+"_product_"+pl.col(LIST_ID_COLUMNS[1]+".jpg").alias("image_path"))
+data_image = data_text.with_columns(("image_"+pl.col(LIST_ID_COLUMNS[0]).cast(pl.Utf8)+"_product_"+pl.col(LIST_ID_COLUMNS[1]).cast(pl.Utf8)+".jpg").alias("image_path"))
 
-# chargement de ResNet50 pré-entrainé
+#chargement de ResNet18 pré-entrainé
 model = resnet18(weights=ResNet18_Weights.DEFAULT)  
 model = torch.nn.Sequential(*list(model.children())[:-1])  # Retirer la couche Fully Connected
 model.eval()
@@ -51,7 +51,7 @@ for i in range(0, data_image.height, batch_size):
     ids_df = sub_data.select(LIST_ID_COLUMNS)
     image_path = sub_data["image_path"].to_list()
 
-    all_embeddings = extract_images_features(input_dir=IMAGE_FOLDER,image_path=image_path,model=model,preprocess=preprocess)
+    all_embeddings = extract_images_features(input_dir=IMAGE_FOLDER,image_paths=image_path,model=model,preprocess=preprocess)
     #Construction du DataFrame Polars 
     columns = [f"image_feat_{i}" for i in range(len(all_embeddings[0]))]
     features_pl = pl.DataFrame(all_embeddings, schema=columns)
