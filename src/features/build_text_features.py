@@ -1,7 +1,7 @@
 import polars as pl
 from transformers import DistilBertTokenizerFast, DistilBertModel
 import gc
-from utils import extract_features_in_batches, clean_description, log_progress
+from utils import extract_text_features_in_batches, clean_description, log_progress
 import time
 import os
 from dvclive import Live
@@ -42,7 +42,7 @@ for i in range(0, data.height, batch_size):
     texts = sub_data.select('_'.join(LIST_TEXT_COLUMN)).to_series().to_list()
 
     # extraction des embeddings pour les textes
-    embeddings = extract_features_in_batches(texts,tokenizer=tokenizer,model=model)
+    embeddings = extract_text_features_in_batches(texts,tokenizer=tokenizer,model=model)
 
     # Converti les embeddings en DataFrame Polars
     columns = [f"text_feat_{i}" for i in range(embeddings.shape[1])]

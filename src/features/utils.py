@@ -4,6 +4,9 @@ import numpy as np
 from transformers import DistilBertTokenizerFast, DistilBertModel
 from bs4 import BeautifulSoup
 import re
+import os
+from PIL import Image
+
 def clean_description(text: str) -> str:
     
     # Nettoyage HTML avec BeautifulSoup
@@ -32,7 +35,7 @@ def log_progress(current, total, start_time):
 
 
 
-def extract_features_in_batches(texts,tokenizer = None, model= None, batch_size=32, max_length=128):
+def extract_text_features_in_batches(texts,tokenizer = None, model= None, batch_size=32, max_length=128):
     
     if tokenizer == None:
         tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
@@ -68,3 +71,21 @@ def extract_features_in_batches(texts,tokenizer = None, model= None, batch_size=
     embeddings_array = np.vstack(all_embeddings)
 
     return embeddings_array
+
+
+def extract_images_features(input_dir,image_paths,preprocess,model= None):
+
+    all_embeddings = []
+
+    with torch.no_grad():
+        for img_id in image_paths:
+            img_path = os.path.join(input_dir,image_paths)
+            try:
+                image = Image.open(img_path).convert('RGB')
+                input_tensor = preprocess(image).unsqueeze(0)
+                batch_embeddings = model(input_tensor).squeeze().numpy()
+                all_embeddings.append(batch_embeddings)
+            except Exception as e:
+                print(f"Erreur sur image {img_id}: {e}")
+                all_embeddings.append([float('nan')] * 512)  # En cas d'erreur, on place un NaN vector de taille 512 (ResNet18)
+    return all_embeddings
