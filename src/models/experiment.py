@@ -27,7 +27,8 @@ dagshub.init(repo_owner=repo_owner, repo_name=repo_name, mlflow=True)
 # Chargement des données Polars 
 X_train = pd.read_parquet(X_train_path)
 y_train = pd.read_parquet(Y_train_Path)
-X_train = X_train.sort_values(by=LIST_ID_COLUMNS).drop(LIST_ID_COLUMNS)
+X_train = X_train.sort_values(by=LIST_ID_COLUMNS)
+X_train = X_train.drop(LIST_ID_COLUMNS)
 y_train = y_train.sort_values(by=LIST_ID_COLUMNS)[TARGET_COLUMN]
 # Identification des colonnes text et image
 text_feat_cols = [col for col in X_train.columns if col.startswith("text_feat_")]
