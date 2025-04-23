@@ -4,6 +4,10 @@ from lightgbm import LGBMClassifier
 from sklearn.model_selection import StratifiedKFold
 from skopt import BayesSearchCV
 from skopt.space import Real, Integer
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 from sklearn.metrics import f1_score, confusion_matrix, classification_report
 import json
 import matplotlib.pyplot as plt
@@ -20,18 +24,44 @@ TARGET_COLUMN = "prdtypecode"
 
 dagshub.init(repo_owner=repo_owner, repo_name=repo_name, mlflow=True)
 
-# === Chargement des données Polars ===
+# Chargement des données Polars 
 X_train = pd.read_parquet(X_train_path)
 y_train = pd.read_parquet(Y_train_Path)
-X_train = X_train.sort_values(by=LIST_ID_COLUMNS)
+X_train = X_train.sort_values(by=LIST_ID_COLUMNS).drop(LIST_ID_COLUMNS)
 y_train = y_train.sort_values(by=LIST_ID_COLUMNS)[TARGET_COLUMN]
-# === Définition de l'espace de recherche ===
+# Identification des colonnes text et image
+text_feat_cols = [col for col in X_train.columns if col.startswith("text_feat_")]
+image_feat_cols = [col for col in X_train.columns if col.startswith("image_feat_")]
+
+# Pipelines pour chaque groupe de features
+text_pipeline = Pipeline(steps=[
+    ("scaler", StandardScaler()),
+    ("pca", PCA())
+])
+image_pipeline = Pipeline(steps=[
+    ("scaler", StandardScaler()),
+    ("pca", PCA())
+])
+# Pipeline complet
+preprocessor = ColumnTransformer(transformers=[
+    ("text", text_pipeline, text_feat_cols),
+    ("image", image_pipeline, image_feat_cols)
+])
+
+pipeline = Pipeline(steps=[
+    ("preprocessor", preprocessor),
+    ("lgbm", LGBMClassifier(random_state=42, early_stopping_rounds=10))
+])
+
+# espace de recherche 
 search_space = {
+    "text_pca_n_components": Integer(5, 100),
+    "image__pca__n_components": Integer(5,100),
     "num_leaves": Integer(20, 150),
     "max_depth": Integer(3, 15),
     "learning_rate": Real(0.01, 0.3, prior="log-uniform"),
     "n_estimators": Integer(50, 500),
-    "subsample": Real(0.5, 1.0),
+    "subsample": Real(0.5, 1.0), 
     "colsample_bytree": Real(0.5, 1.0),
 }
 
@@ -46,10 +76,10 @@ def mlflow_callback(search_result):
                            "std_weighted_f1":search_result.cv_results_.std_test_score})
 
 opt = BayesSearchCV(
-    estimator=LGBMClassifier(random_state=42),
+    estimator=pipeline,
     search_spaces=search_space,
     cv=cv,
-    n_iter=30,
+    n_iter=5,
     n_jobs=-1,
     scoring="f1_weighted",
     verbose=0,
