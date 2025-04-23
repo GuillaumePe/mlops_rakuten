@@ -1,4 +1,4 @@
-import polars as pl
+import pandas as pd
 import mlflow
 from lightgbm import LGBMClassifier
 from sklearn.model_selection import StratifiedKFold
@@ -14,15 +14,17 @@ import dagshub
 repo_owner='GuillaumePe'
 repo_name='mar25_cmlops_rakuten'
 X_train_path = "mar25_cmlops_rakuten/data/preprocessed/final/X_train_processed_final.parquet"
+Y_train_Path = "/home/ubuntu/mar25_cmlops_rakuten/data/preprocessed/final/Y_train_final.parquet"
+LIST_ID_COLUMNS = ["imageid", "productid"]
+TARGET_COLUMN = "prdtypecode" 
 
 dagshub.init(repo_owner=repo_owner, repo_name=repo_name, mlflow=True)
 
 # === Chargement des données Polars ===
-df = pl.read_parquet(X_train_path)
-
-X_train = df.drop("label_column").to_pandas()
-y_train = df["label_column"].to_pandas()
-
+X_train = pd.read_parquet(X_train_path)
+y_train = pd.read_csv(Y_train_Path)
+X_train = X_train.sort_values(by=LIST_ID_COLUMNS)
+y_train = y_train.sort_values(by=LIST_ID_COLUMNS)[TARGET_COLUMN]
 # === Définition de l'espace de recherche ===
 search_space = {
     "num_leaves": Integer(20, 150),
