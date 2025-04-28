@@ -2,7 +2,6 @@ import pandas as pd
 import numpy as np
 import optuna
 import mlflow
-from optuna.integration.mlflow import MLflowCallback
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler
@@ -14,7 +13,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import json
 import dagshub
-from utils import get_or_create_experiment, objective_wrapper, champion_callback
+from utils import get_or_create_experiment, objective_wrapper_pca, champion_callback
 
 
 #Paramètres
@@ -33,7 +32,7 @@ X_train = pd.read_parquet(X_train_path)
 y_train = pd.read_parquet(Y_train_Path)
 X_train = X_train.sort_values(by=LIST_ID_COLUMNS)
 y_train = y_train.sort_values(by=LIST_ID_COLUMNS)[TARGET_COLUMN]
-
+num_class = y_train.nunique()
 X_train = X_train.drop(columns=LIST_ID_COLUMNS, errors="raise") 
 # Identification des colonnes text et image
 text_feat_cols = [col for col in X_train.columns if col.startswith("text_feat_")]
@@ -47,7 +46,7 @@ dagshub.init(repo_owner=repo_owner, repo_name=repo_name, mlflow=True)
 
 #MLflow 
 experiment_id = get_or_create_experiment("GP_optuna_lightgbm_stratified")
-run_name = "first_attempt"
+run_name = "second_attempt"
 
 mlflow.set_experiment(experiment_id=experiment_id)
 
@@ -58,11 +57,11 @@ with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=Tru
 
   # Execute the hyperparameter optimization trials.
   # Note the addition of the `champion_callback` inclusion to control our logging
-  study.optimize(
-    objective=objective_wrapper(
+  study.optimize(objective_wrapper_pca(
         split_operator=skf,
         X_train=X_train,
         y_train=y_train,
+        num_class=num_class,
         metric=f1_score),
     n_trials=n_trials_bayesian_search,
     callbacks=[champion_callback])
@@ -81,6 +80,8 @@ with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=Tru
       }
   )
   best_params = study.best_params.copy()
+  lgbm_params = {k.replace("lgbm__", ""): v for k, v in best_params.items() if k.startswith("lgbm__")}
+
   # Final Pipeline
   text_pipeline = Pipeline([
              ("scaler", StandardScaler()),
@@ -93,7 +94,7 @@ with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=Tru
              ("image", image_pipeline, image_feat_cols)])
   final_pipeline = Pipeline([
             ("preprocessor", preprocessor),
-            ("lgbm", LGBMClassifier(**best_params.pop("params")))])
+            ("lgbm", LGBMClassifier(**lgbm_params))])
 
   final_pipeline.fit(X_train, y_train)
   y_pred_finale = final_pipeline.predict(X_train)
