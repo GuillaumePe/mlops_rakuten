@@ -60,7 +60,7 @@ def champion_callback(study, frozen_trial):
       else:
           print(f"Initial trial {frozen_trial.number} achieved value: {frozen_trial.value}")
 
-def objective_wrapper_pca(split_operator, X_train, y_train, metric,):
+def objective_wrapper_pca(split_operator, X_train, y_train,num_class, metric,):
     
     def objective(trial):
 
@@ -91,10 +91,10 @@ def objective_wrapper_pca(split_operator, X_train, y_train, metric,):
             "lgbm__colsample_bytree": lgbm__colsample_bytree,
             "lgbm__scale_pos_weight":lgbm__scale_pos_weight,
             "lgbm__minc_split_gain":lgbm__minc_split_gain,
+            "lgbm__num_class":num_class,
             "random_state": 42,
            "verbosity": -1
           }
-        
         preprocessing_params = {"preprocessor__text__pca__n_components": preprocessor__text__pca__n_components,
                                 "preprocessor__image__pca__n_components": preprocessor__image__pca__n_components}
 
@@ -136,7 +136,7 @@ def objective_wrapper_pca(split_operator, X_train, y_train, metric,):
 
 
 
-def objective_wrapper_lgbm(split_operator, X_train, y_train, metric,):
+def objective_wrapper_lgbm(split_operator, X_train, y_train,num_class, metric,):
     
     def objective(trial):
 
@@ -160,6 +160,7 @@ def objective_wrapper_lgbm(split_operator, X_train, y_train, metric,):
             "subsample": subsample,
             "colsample_bytree": colsample_bytree,
             "scale_pos_weight": scale_pos_weight,
+            "num_class":num_class,
             "random_state": 42,
            "verbosity": -1
           }
