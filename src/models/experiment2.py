@@ -7,6 +7,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, classification_report, confusion_matrix
 from lightgbm import LGBMClassifier
 import matplotlib.pyplot as plt
@@ -27,17 +28,19 @@ n_trials_bayesian_search = 10
 
 
 # Chargement des données Polars 
-X_train = pd.read_parquet(X_train_path)
+X = pd.read_parquet(X_train_path)
 
-y_train = pd.read_parquet(Y_train_Path)
-X_train = X_train.sort_values(by=LIST_ID_COLUMNS)
-y_train = y_train.sort_values(by=LIST_ID_COLUMNS)[TARGET_COLUMN]
-num_class = y_train.nunique()
-X_train = X_train.drop(columns=LIST_ID_COLUMNS, errors="raise") 
+y = pd.read_parquet(Y_train_Path)
+X = X.sort_values(by=LIST_ID_COLUMNS)
+y = y.sort_values(by=LIST_ID_COLUMNS)[TARGET_COLUMN]
+num_class = y.nunique()
+X = X.drop(columns=LIST_ID_COLUMNS, errors="raise") 
 # Identification des colonnes text et image
-text_feat_cols = [col for col in X_train.columns if col.startswith("text_feat_")]
-image_feat_cols = [col for col in X_train.columns if col.startswith("image_feat_")]
+text_feat_cols = [col for col in X.columns if col.startswith("text_feat_")]
+image_feat_cols = [col for col in X.columns if col.startswith("image_feat_")]
 
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.20, random_state=42)
 # Stratified CV
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
@@ -96,14 +99,14 @@ with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=Tru
             ("preprocessor", preprocessor),
             ("lgbm", LGBMClassifier(**lgbm_params))])
 
-  final_pipeline.fit(X_train, y_train)
-  y_pred_finale = final_pipeline.predict(X_train)
-  f1_finale = f1_score(y_train, y_pred_finale, average="weighted")
+  final_pipeline.fit(X_test, y_test)
+  y_pred_finale = final_pipeline.predict(X_test)
+  f1_finale = f1_score(y_test, y_pred_finale, average="weighted")
 
   mlflow.log_metric("optuna_best_model", f1_finale)
 
  # Confusion matrix
-  cm = confusion_matrix(y_train, y_pred_finale)
+  cm = confusion_matrix(y_test, y_pred_finale)
   plt.figure(figsize=(12, 10))
   sns.heatmap(cm, annot=False, fmt="d", cmap="Blues")
   plt.title("Confusion Matrix")
@@ -114,7 +117,7 @@ with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=Tru
   mlflow.log_artifact("confusion_matrix.png")
 
  # Classification report
-  report = classification_report(y_train, y_pred_finale, output_dict=True)
+  report = classification_report(y_test, y_pred_finale, output_dict=True)
   with open("classification_report.json", "w") as f:
     json.dump(report, f, indent=4)
   mlflow.log_artifact("classification_report.json")

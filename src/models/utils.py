@@ -74,7 +74,7 @@ def objective_wrapper_pca(split_operator, X_train, y_train,num_class, metric,):
         preprocessor__image__pca__n_components = trial.suggest_int("preprocessor__image__pca__n_components",100, 150)
         
         lgbm__max_depth = trial.suggest_int("max_depth", 3, 20)
-        max_num_leaves = min(2**lgbm__max_depth, 200)
+        max_num_leaves = max(min(2**lgbm__max_depth, 200),50)
         lgbm__num_leaves = trial.suggest_int("num_leaves", 50, max_num_leaves)
         lgbm__learning_rate = trial.suggest_float("learning_rate", 0.01, 0.5, log=True)
         lgbm__n_estimators= trial.suggest_int("n_estimators", 100, 500)
