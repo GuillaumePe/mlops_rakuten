@@ -104,7 +104,12 @@ with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=Tru
   final_pipeline.fit(X_train, y_train)
   y_pred_finale = final_pipeline.predict(X_test)
   f1_finale = f1_score(y_test, y_pred_finale, average="weighted")
-
+  
+  mlflow.sklearn.log_model(
+      sk_model=final_pipeline,
+      artifact_path="model",
+      registered_model_name="pca_lgbm_pipeline"
+  )
   mlflow.log_metric("optuna_best_model", f1_finale)
 
  # Confusion matrix
