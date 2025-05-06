@@ -29,11 +29,13 @@ n_trials_bayesian_search = 10
 
 # Chargement des données Polars 
 X = pd.read_parquet(X_train_path)
-
 y = pd.read_parquet(Y_train_Path)
+
 X = X.sort_values(by=LIST_ID_COLUMNS)
 y = y.sort_values(by=LIST_ID_COLUMNS)[TARGET_COLUMN]
+
 num_class = y.nunique()
+
 X = X.drop(columns=LIST_ID_COLUMNS, errors="raise") 
 # Identification des colonnes text et image
 text_feat_cols = [col for col in X.columns if col.startswith("text_feat_")]
@@ -99,7 +101,7 @@ with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=Tru
             ("preprocessor", preprocessor),
             ("lgbm", LGBMClassifier(**lgbm_params))])
 
-  final_pipeline.fit(X_test, y_test)
+  final_pipeline.fit(X_train, y_train)
   y_pred_finale = final_pipeline.predict(X_test)
   f1_finale = f1_score(y_test, y_pred_finale, average="weighted")
 
