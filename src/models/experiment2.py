@@ -51,7 +51,7 @@ dagshub.init(repo_owner=repo_owner, repo_name=repo_name, mlflow=True)
 
 #MLflow 
 experiment_id = get_or_create_experiment("GP_optuna_lightgbm_stratified")
-run_name = "second_attempt"
+run_name = "third_attempt"
 
 mlflow.set_experiment(experiment_id=experiment_id)
 
@@ -59,6 +59,19 @@ mlflow.set_experiment(experiment_id=experiment_id)
 with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=True):
   # Initialize the Optuna study
   study = optuna.create_study(direction="maximize")
+  
+  hyperparameters = {
+    "preprocessor__text__pca__n_components": ("int", 150, 250),
+    "preprocessor__image__pca__n_components": ("int", 150, 250),
+    "lgbm__max_depth": ("int", 3, 15),
+    "lgbm__num_leaves": ("int", 50, 150),
+    "lgbm__learning_rate": ("float", 0.005, 0.2),
+    "lgbm__n_estimators": ("int", 400, 800),
+    "lgbm__min_split_gain": ("float", 0.5, 1),
+    "lgbm__subsample": ("float", 0.6, 0.8),
+    "lgbm__colsample_bytree": ("float", 0.3, 0.8),
+    "lgbm__scale_pos_weight": ("float", 20, 80)
+}
 
   # Execute the hyperparameter optimization trials.
   # Note the addition of the `champion_callback` inclusion to control our logging
@@ -67,7 +80,8 @@ with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=Tru
         X_train=X_train,
         y_train=y_train,
         num_class=num_class,
-        metric=f1_score),
+        metric=f1_score,
+        hyperparameters=hyperparameters),
     n_trials=n_trials_bayesian_search,
     callbacks=[champion_callback])
 
@@ -114,8 +128,8 @@ with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=Tru
 
  # Confusion matrix
   cm = confusion_matrix(y_test, y_pred_finale)
-  plt.figure(figsize=(12, 10))
-  sns.heatmap(cm, annot=False, fmt="d", cmap="Blues")
+  plt.figure(figsize=(12, 12))
+  sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
   plt.title("Confusion Matrix")
   plt.xlabel("Predicted")
   plt.ylabel("True")

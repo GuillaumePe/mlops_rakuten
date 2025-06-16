@@ -13,7 +13,7 @@ LIST_ID_COLUMNS = ["imageid", "productid"]
 IMAGE_FOLDER = "/home/ubuntu/mar25_cmlops_rakuten/data/raw_data/images/image_train"
 OUTPUT_DIR = "/home/ubuntu/mar25_cmlops_rakuten/data/preprocessed/chunked_image_files"
 
-def build_images_features_func(INPUT_CSV,LIST_ID_COLUMNS,IMAGE_FOLDER,OUTPUT_DIR):
+def build_images_features_func(INPUT_CSV,LIST_ID_COLUMNS,IMAGE_FOLDER,OUTPUT_DIR,NUM_BATCH_INIT=0):
    
     #chargement de ResNet18 pré-entrainé
     model = resnet18(weights=ResNet18_Weights.DEFAULT)  
@@ -42,7 +42,7 @@ def build_images_features_func(INPUT_CSV,LIST_ID_COLUMNS,IMAGE_FOLDER,OUTPUT_DIR
 
     for i in range(0, data_image.height, batch_size):
         
-        batch_num = i // batch_size
+        batch_num = i // batch_size + NUM_BATCH_INIT
         output_file = os.path.join(OUTPUT_DIR, f"features_image_chunk_{batch_num:04d}.parquet")
 
         if os.path.exists(output_file):

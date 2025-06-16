@@ -4,7 +4,7 @@ import gc
 from utils import extract_text_features_in_batches, clean_description, log_progress
 import time
 import os
-
+import datetime 
 # Paramètres
 INPUT_CSV = "/home/ubuntu/mar25_cmlops_rakuten/data/raw_data/X_train.csv"
 LIST_TEXT_COLUMN = ["designation","description"]
@@ -12,7 +12,7 @@ LIST_ID_COLUMNS = ["imageid","productid"]
 OUTPUT_DIR = "/home/ubuntu/mar25_cmlops_rakuten/data/preprocessed/chunked_text_files"
 
 
-def build_text_features_func(INPUT_CSV,LIST_ID_COLUMNS,LIST_TEXT_COLUMN,OUTPUT_DIR):
+def build_text_features_func(INPUT_CSV,LIST_ID_COLUMNS,LIST_TEXT_COLUMN,OUTPUT_DIR,NUM_BATCH_INIT=0):
     # Chargement des données et nettoyages
     data = pl.read_csv(INPUT_CSV)
     data = data.with_columns(pl.concat_str([pl.col(LIST_TEXT_COLUMN[0]),pl.col(LIST_TEXT_COLUMN[1])],separator=". ",ignore_nulls=True).alias('_'.join(LIST_TEXT_COLUMN)))
@@ -29,9 +29,8 @@ def build_text_features_func(INPUT_CSV,LIST_ID_COLUMNS,LIST_TEXT_COLUMN,OUTPUT_D
     start_time = time.time()
 
     for i in range(0, data.height, batch_size):
-        batch_start = time.time()
-        batch_num = i // batch_size
-        output_file = os.path.join(OUTPUT_DIR, f"features_text_chunk_{batch_num:04d}.parquet")
+        batch_num = i // batch_size + NUM_BATCH_INIT
+        output_file = os.path.join(OUTPUT_DIR, f"features_text_chunk_{batch_num:04d}_.parquet")
         
         if os.path.exists(output_file):
             continue
@@ -60,5 +59,10 @@ def build_text_features_func(INPUT_CSV,LIST_ID_COLUMNS,LIST_TEXT_COLUMN,OUTPUT_D
         del sub_data, texts, embeddings, features_pl, ids_df, final_sub_df 
         gc.collect()
         log_progress(batch_num + 1, total_batches, start_time)
-    return f"images features exctract in {OUTPUT_DIR}"
+    
+    return f"text features exctract in {OUTPUT_DIR}"
+
+if __name__ == "__main__":
+    build_text_features_func(INPUT_CSV,LIST_ID_COLUMNS,LIST_TEXT_COLUMN,OUTPUT_DIR)
+
    

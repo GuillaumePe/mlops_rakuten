@@ -6,7 +6,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from lightgbm import LGBMClassifier
-
+from sklearn.metrics import f1_score
 
 def get_or_create_experiment(experiment_name):
   """
@@ -60,7 +60,9 @@ def champion_callback(study, frozen_trial):
       else:
           print(f"Initial trial {frozen_trial.number} achieved value: {frozen_trial.value}")
 
-def objective_wrapper_pca(split_operator, X_train, y_train,num_class, metric,):
+
+#fonction ojective pour l'optimisation par optuna
+def objective_wrapper_pca(split_operator, X_train, y_train,num_class, metric, hyperparameters):
     
     def objective(trial):
 
@@ -70,49 +72,51 @@ def objective_wrapper_pca(split_operator, X_train, y_train,num_class, metric,):
         image_feat_cols = [col for col in X_train.columns if col.startswith("image_feat_")]
     
         #Search Space
-        preprocessor__text__pca__n_components = trial.suggest_int("preprocessor__text__pca__n_components", 100, 150)
-        preprocessor__image__pca__n_components = trial.suggest_int("preprocessor__image__pca__n_components",100, 150)
-        
-        lgbm__max_depth = trial.suggest_int("max_depth", 3, 20)
-        max_num_leaves = max(min(2**lgbm__max_depth, 200),50)
-        lgbm__num_leaves = trial.suggest_int("num_leaves", 50, max_num_leaves)
-        lgbm__learning_rate = trial.suggest_float("learning_rate", 0.01, 0.5, log=True)
-        lgbm__n_estimators= trial.suggest_int("n_estimators", 100, 500)
-        lgbm__minc_split_gain = trial.suggest_float("min_split_gain",0,1)
-        lgbm__subsample = trial.suggest_float("subsample", 0.6, 1.0),
-        lgbm__colsample_bytree = trial.suggest_float("colsample_bytree", 0.4, 1.0)
-        lgbm__scale_pos_weight = trial.suggest_float("scale_pos_weight", 20, 80)
-        params = {
-            "lgbm__num_leaves": lgbm__num_leaves,
-            "lgbm__max_depth": lgbm__max_depth,
-            "lgbm__learning_rate": lgbm__learning_rate,
-            "lgbm__n_estimators": lgbm__n_estimators,
-            "lgbm__subsample": lgbm__subsample,
-            "lgbm__colsample_bytree": lgbm__colsample_bytree,
-            "lgbm__scale_pos_weight":lgbm__scale_pos_weight,
-            "lgbm__minc_split_gain":lgbm__minc_split_gain,
-            "lgbm__num_class":num_class,
-            "random_state": 42,
-           "verbosity": -1
-          }
-        preprocessing_params = {"preprocessor__text__pca__n_components": preprocessor__text__pca__n_components,
-                                "preprocessor__image__pca__n_components": preprocessor__image__pca__n_components}
+        all_params = {}
 
-        all_params = {**preprocessing_params, **params}
-    
+        for param_name, param_value in hyperparameters.items():
+          if param_name=="lgbm__num_leaves" and isinstance(param_value, tuple) and len(param_value) == 3:
+            max_num_leaves = max(min(2 ** all_params["lgbm__max_depth"], param_value[2]), param_value[1])
+            all_params["lgbm__num_leaves"] = trial.suggest_int("lgbm__num_leaves", param_value[1], max_num_leaves)
+          
+          elif isinstance(param_value, tuple) and len(param_value) == 3:
+              if param_value[0] == "int":
+                all_params[param_name] = trial.suggest_int(param_name, param_value[1], param_value[2])
+              elif param_value[0] == "float":
+                all_params[param_name] = trial.suggest_float(param_name, param_value[1], param_value[2], log=True)
+
+        all_params.update({
+                "lgbm__num_class": num_class,
+                "random_state": 42,
+                "verbosity": -1})
+        
+        lgbm__params = {
+                    "lgbm__num_leaves": all_params["lgbm__num_leaves"],
+                    "lgbm__max_depth": all_params["lgbm__max_depth"],
+                    "lgbm__learning_rate": all_params["lgbm__learning_rate"],
+                    "lgbm__n_estimators": all_params["lgbm__n_estimators"],
+                    "lgbm__subsample": all_params["lgbm__subsample"],
+                    "lgbm__colsample_bytree": all_params["lgbm__colsample_bytree"],
+                    "lgbm__scale_pos_weight":all_params["lgbm__scale_pos_weight"],
+                    "lgbm__min_split_gain":all_params["lgbm__min_split_gain"],
+                    "lgbm__num_class":all_params["lgbm__num_class"],
+                    "random_state": all_params["random_state"],
+                    "verbosity": all_params["verbosity"]
+                  }
+        
         # Pipelines
         text_pipeline = Pipeline([
              ("scaler", StandardScaler()),
-             ("pca", PCA(n_components=preprocessor__text__pca__n_components))])
+             ("pca", PCA(n_components=all_params["preprocessor__text__pca__n_components"]))])
         image_pipeline = Pipeline([
              ("scaler", StandardScaler()),
-             ("pca", PCA(n_components=preprocessor__image__pca__n_components))])
+             ("pca", PCA(n_components=all_params["preprocessor__image__pca__n_components"]))])
         preprocessor = ColumnTransformer([
              ("text", text_pipeline, text_feat_cols),
              ("image", image_pipeline, image_feat_cols)])
         pipeline = Pipeline([
             ("preprocessor", preprocessor),
-            ("lgbm", LGBMClassifier(**params))])
+            ("lgbm", LGBMClassifier(**lgbm__params))])
 
         f1_scores = []
 
@@ -186,4 +190,67 @@ def objective_wrapper_lgbm(split_operator, X_train, y_train,num_class, metric,):
 
         return np.mean(f1_scores)-np.std(f1_scores)
     return objective
+
+
+
+import mlflow
+from sklearn.metrics import f1_score
+
+
+#fonction d'evaluation permettant de comparer une liste de versions d'un modèle enregistré dans le registre MLflow
+def compare_model_versions(model_name, versions, X_test, y_test, metric=lambda y_true, y_pred: f1_score(y_true, y_pred, average="weighted")):
+    best_score = -float('inf')
+    best_version = None
+
+    for version in versions:
+        # chargement des modèles depuis le registre
+        model_uri = f"models:/{model_name}/{version}"
+        model = mlflow.pyfunc.load_model(model_uri)
+
+        # predictions
+        predictions = model.predict(X_test)
+
+        # métrique
+        score = metric(y_test, predictions)
+        print(f"Model {model_name} version {version} - Score: {score}")
+
+        # miettre à jour le meilleur modèle si besoin
+        if score > best_score:
+            best_score = score
+            best_version = version
+    
+    # Add a tag to the best model in the registry
+    client = mlflow.tracking.MlflowClient()
+    client.set_registered_model_tag(model_name, "best_model_version", best_version)
+    print(f"Best model version: {best_version} with score: {best_score}")
+    return best_version
+
+
+def compare_best_models(model_names: list, X_test, y_test, metric=lambda y_true, y_pred: f1_score(y_true, y_pred, average="weighted")):
+    
+    best_score = -float('inf')
+    best_model = None
+
+    client = mlflow.tracking.MlflowClient()
+
+    for model_name in model_names:
+        # Get the latest two versions of the model
+        versions = [v.version for v in client.search_model_versions(f"name='{model_name}'")[-2:]]
+        
+        # Use the compare_models function to determine the best version among the two latest
+        best_version = compare_model_versions(model_name, versions, X_test, y_test, metric)
+
+        # Load and evaluate the best version
+        model_uri = f"models:/{model_name}/{best_version}"
+        model = mlflow.pyfunc.load_model(model_uri)
+        predictions = model.predict(X_test)
+        score = metric(y_test, predictions)
+        print(f"Best model for {model_name} (version {best_version}) - Score: {score}")
+
+        if score > best_score:
+            best_score = score
+            best_model = model_name
+
+    print(f"Overall best model: {best_model} with score: {best_score}")
+    return best_model
 
