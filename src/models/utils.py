@@ -191,10 +191,28 @@ def objective_wrapper_lgbm(split_operator, X_train, y_train,num_class, metric,):
         return np.mean(f1_scores)-np.std(f1_scores)
     return objective
 
+###fonction permettant d'établir automatiquement des nom de run incrémentale en fonctipon des exp déjà existante dans mlflow
+def ordinal(n):
+    return ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"][n-1] if n <= 10 else f"{n}th"
+
+def get_next_run_name(base_name="attempt",experiment_name="GP_optuna_lightgbm_stratified_ops"):
+    client = mlflow.tracking.MlflowClient()
+    experiment = client.get_experiment_by_name(experiment_name)  # remplace par le nom réel
+    if not experiment:
+        return f"first_{base_name}"
+
+    runs = client.search_runs(experiment_ids=[experiment.experiment_id])
+    existing_names = [run.data.tags.get("mlflow.runName") for run in runs]
+
+    # Trouver le prochain suffixe
+    i = 1
+    while True:
+        candidate = f"{ordinal(i)}_{base_name}"
+        if candidate not in existing_names:
+            return candidate
+        i += 1
 
 
-import mlflow
-from sklearn.metrics import f1_score
 
 
 #fonction d'evaluation permettant de comparer une liste de versions d'un modèle enregistré dans le registre MLflow
@@ -251,6 +269,30 @@ def compare_best_models(model_names: list, X_test, y_test, metric=lambda y_true,
             best_score = score
             best_model = model_name
 
-    print(f"Overall best model: {best_model} with score: {best_score}")
-    return best_model
+    print(f"Overall best model: {best_model}, version :{best_version}, with score: {best_score}")
+    return {"best_model":best_model, "best_version":best_version}
 
+
+
+
+
+
+
+#Fonction permettant de promouvoir le meilleur modèle en production
+
+def promotion_exclusive_best_model_to_production(model_name, model_version):
+    client = mlflow.tracking.MlflowClient()
+
+    # Supprimer l'alias "champion" s'il existe déjà
+    try:
+        current_alias_info = client.get_model_version_by_alias(model_name, "champion")
+        current_version = current_alias_info.version
+        if current_version != model_version:
+            print(f"Suppression de l'alias 'champion' actuellement sur version {current_version}")
+            client.delete_registered_model_alias(model_name, "champion")
+    except mlflow.exceptions.RestException:
+        print("Alias 'champion' non trouvé, aucun conflit à résoudre.")
+
+    # Ajouter alias "champion" à la nouvelle version
+    print(f"Ajout de l'alias 'champion' à {model_name} v{model_version} pour mise en Production")
+    client.set_registered_model_alias(model_name, alias="champion", version=model_version)

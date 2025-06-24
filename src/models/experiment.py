@@ -1,116 +1,162 @@
 import pandas as pd
+import numpy as np
+import optuna
 import mlflow
-from lightgbm import LGBMClassifier
-from sklearn.model_selection import StratifiedKFold
-from skopt import BayesSearchCV
-from skopt.space import Real, Integer
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-from sklearn.metrics import f1_score, confusion_matrix, classification_report
-import json
+from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score, classification_report, confusion_matrix
+from lightgbm import LGBMClassifier
 import matplotlib.pyplot as plt
 import seaborn as sns
+import json
 import dagshub
+from pymongo import MongoClient
+from utils import get_or_create_experiment, objective_wrapper_pca, champion_callback, get_next_run_name
 
-#Paramètres
-repo_owner='GuillaumePe'
-repo_name='mar25_cmlops_rakuten'
-X_train_path = "/home/ubuntu/mar25_cmlops_rakuten/data/preprocessed/final/X_train_processed_final.parquet"
-Y_train_Path = "/home/ubuntu/mar25_cmlops_rakuten/data/preprocessed/final/Y_train_final.parquet"
+
+# Paramètres
+repo_owner = 'GuillaumePe'
+repo_name = 'mar25_cmlops_rakuten'
 LIST_ID_COLUMNS = ["imageid", "productid"]
-TARGET_COLUMN = "prdtypecode" 
+TARGET_COLUMN = "prdtypecode"
+n_trials_bayesian_search = 2
+ml_flow_experiment_name= "GP_optuna_lightgbm_stratified_ops"
 
+# Connexion MongoDB
+client = MongoClient("mongodb://localhost:27017")
+db = client["MAR25_CMLOPS_RAKUTEN"]
+
+# Chargement X
+X = pd.DataFrame(list(db.X_train_final.find({}, {"_id": 0})))
+product_ids_in_X = set(X["productid"])
+
+# Chargement complet de Y
+Y_all = pd.DataFrame(list(db.Y_train_final.find({}, {"_id": 0, "productid": 1, TARGET_COLUMN: 1})))
+#print(len(Y_all))
+# Filtrage côté Pandas
+Y = Y_all[Y_all["productid"].isin(product_ids_in_X)]
+#print(len(Y_all))
+# Alignement via tri sur les ID
+X = X.sort_values(by=LIST_ID_COLUMNS)
+Y = Y.sort_values(by="productid")
+y = Y[TARGET_COLUMN]
+#print(len(y))
+# Drop colonnes ID de X
+X = X.drop(columns=LIST_ID_COLUMNS, errors="raise")
+
+
+# Séparation des colonnes
+text_feat_cols = [col for col in X.columns if col.startswith("text_feat_")]
+image_feat_cols = [col for col in X.columns if col.startswith("image_feat_")]
+num_class = y.nunique()
+
+# Split des données
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, stratify=y, test_size=0.20, random_state=42
+)
+# Stratified CV
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+# Initialisation Dagshub
 dagshub.init(repo_owner=repo_owner, repo_name=repo_name, mlflow=True)
 
-# Chargement des données Polars 
-X_train = pd.read_parquet(X_train_path)
-y_train = pd.read_parquet(Y_train_Path)
-X_train = X_train.sort_values(by=LIST_ID_COLUMNS)
-X_train = X_train.drop(LIST_ID_COLUMNS)
-y_train = y_train.sort_values(by=LIST_ID_COLUMNS)[TARGET_COLUMN]
-# Identification des colonnes text et image
-text_feat_cols = [col for col in X_train.columns if col.startswith("text_feat_")]
-image_feat_cols = [col for col in X_train.columns if col.startswith("image_feat_")]
+#MLflow 
+experiment_id = get_or_create_experiment(ml_flow_experiment_name)
+run_name = get_next_run_name("attempt")
 
-# Pipelines pour chaque groupe de features
-text_pipeline = Pipeline(steps=[
-    ("scaler", StandardScaler()),
-    ("pca", PCA())
-])
-image_pipeline = Pipeline(steps=[
-    ("scaler", StandardScaler()),
-    ("pca", PCA())
-])
-# Pipeline complet
-preprocessor = ColumnTransformer(transformers=[
-    ("text", text_pipeline, text_feat_cols),
-    ("image", image_pipeline, image_feat_cols)
-])
+mlflow.set_experiment(experiment_id=experiment_id)
 
-pipeline = Pipeline(steps=[
-    ("preprocessor", preprocessor),
-    ("lgbm", LGBMClassifier(random_state=42, early_stopping_rounds=10))
-])
-
-# espace de recherche 
-search_space = {
-    "text_pca_n_components": Integer(5, 100),
-    "image__pca__n_components": Integer(5,100),
-    "num_leaves": Integer(20, 150),
-    "max_depth": Integer(3, 15),
-    "learning_rate": Real(0.01, 0.3, prior="log-uniform"),
-    "n_estimators": Integer(50, 500),
-    "subsample": Real(0.5, 1.0), 
-    "colsample_bytree": Real(0.5, 1.0),
+# Initiate the parent run and call the hyperparameter tuning child run logic
+with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=True):
+  # Initialize the Optuna study
+  study = optuna.create_study(direction="maximize")
+  
+  hyperparameters = {
+    "preprocessor__text__pca__n_components": ("int", 150, 250),
+    "preprocessor__image__pca__n_components": ("int", 150, 250),
+    "lgbm__max_depth": ("int", 3, 15),
+    "lgbm__num_leaves": ("int", 50, 150),
+    "lgbm__learning_rate": ("float", 0.005, 0.2),
+    "lgbm__n_estimators": ("int", 400, 800),
+    "lgbm__min_split_gain": ("float", 0.5, 1),
+    "lgbm__subsample": ("float", 0.6, 0.8),
+    "lgbm__colsample_bytree": ("float", 0.3, 0.8),
+    "lgbm__scale_pos_weight": ("float", 20, 80)
 }
 
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+  # Execute the hyperparameter optimization trials.
+  # Note the addition of the `champion_callback` inclusion to control our logging
+  study.optimize(objective_wrapper_pca(
+        split_operator=skf,
+        X_train=X_train,
+        y_train=y_train,
+        num_class=num_class,
+        metric=f1_score,
+        hyperparameters=hyperparameters),
+    n_trials=n_trials_bayesian_search,
+    callbacks=[champion_callback])
 
-mlflow.set_experiment("GP_exp1_lightgbm_bayesian_search")
+  mlflow.log_params(study.best_params)
+  mlflow.log_metric("mean-std of weighted f1 score", study.best_value)
+  
 
-def mlflow_callback(search_result):
-    with mlflow.start_run(nested=True):
-        mlflow.log_params(search_result.cv_results_.params)
-        mlflow.log_metric({"mean_weighted_f1":search_result.cv_results_.mean_test_score,
-                           "std_weighted_f1":search_result.cv_results_.std_test_score})
+  # Log tags
+  mlflow.set_tags(
+      tags={
+          "project": "MA25_CMLOPS_RAKUTEN",
+          "optimizer_engine": "optuna",
+          "Pipline": "distilbert et resnet18 suivis de PCA et regroupé en entrée d'un LightGBM",
+          "feature_set_version": 1,
+      }
+  )
+  best_params = study.best_params.copy()
+  lgbm_params = {k.replace("lgbm__", ""): v for k, v in best_params.items() if k.startswith("lgbm__")}
 
-opt = BayesSearchCV(
-    estimator=pipeline,
-    search_spaces=search_space,
-    cv=cv,
-    n_iter=5,
-    n_jobs=-1,
-    scoring="f1_weighted",
-    verbose=0,
-    random_state=42,
-    refit=True
-)
+  # Final Pipeline
+  text_pipeline = Pipeline([
+             ("scaler", StandardScaler()),
+             ("pca", PCA(n_components=best_params.pop("preprocessor__text__pca__n_components")))])
+  image_pipeline = Pipeline([
+             ("scaler", StandardScaler()),
+             ("pca", PCA(n_components=best_params.pop("preprocessor__image__pca__n_components")))])
+  preprocessor = ColumnTransformer([
+             ("text", text_pipeline, text_feat_cols),
+             ("image", image_pipeline, image_feat_cols)])
+  final_pipeline = Pipeline([
+            ("preprocessor", preprocessor),
+            ("lgbm", LGBMClassifier(**lgbm_params))])
 
-with mlflow.start_run(run_name="lgbm_bayesian_weighted_f1"):
-    opt.fit(X_train, y_train, callback=mlflow_callback)
+  final_pipeline.fit(X_train, y_train)
+  y_pred_finale = final_pipeline.predict(X_test)
+  f1_finale = f1_score(y_test, y_pred_finale, average="weighted")
+  
+  mlflow.sklearn.log_model(
+      sk_model=final_pipeline,
+      artifact_path="model",
+      registered_model_name="pca_lgbm_pipeline"
+  )
+  mlflow.log_metric("optuna_best_model", f1_finale)
 
-    mlflow.log_params(opt.best_params_)
-    mlflow.log_metric("best_weighted_f1", opt.best_score_)
+ # Confusion matrix
+  cm = confusion_matrix(y_test, y_pred_finale)
+  plt.figure(figsize=(12, 12))
+  sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+  plt.title("Confusion Matrix")
+  plt.xlabel("Predicted")
+  plt.ylabel("True")
+  plt.tight_layout()
+  plt.savefig("confusion_matrix.png")
+  mlflow.log_artifact("confusion_matrix.png")
 
-    y_pred = opt.predict(X_train)
+ # Classification report
+  report = classification_report(y_test, y_pred_finale, output_dict=True)
+  with open("classification_report.json", "w") as f:
+    json.dump(report, f, indent=4)
+  mlflow.log_artifact("classification_report.json")
 
-    f1 = f1_score(y_train, y_pred, average="weighted")
-    report = classification_report(y_train, y_pred, output_dict=True)
-    cm = confusion_matrix(y_train, y_pred)
+  mlflow.log_params(best_params)
 
-    with open("classification_report.json", "w") as f:
-        json.dump(report, f, indent=4)
-    mlflow.log_artifact("classification_report.json")
-
-    plt.figure(figsize=(12, 10))
-    sns.heatmap(cm, annot=False, fmt='d', cmap="Blues")
-    plt.title("Confusion Matrix")
-    plt.xlabel("Predicted")
-    plt.ylabel("True")
-    plt.tight_layout()
-    plt.savefig("confusion_matrix.png")
-    mlflow.log_artifact("confusion_matrix.png")
-
-print("Best Params:", opt.best_params_)
