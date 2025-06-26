@@ -296,3 +296,6 @@ def promotion_exclusive_best_model_to_production(model_name, model_version):
     # Ajouter alias "champion" à la nouvelle version
     print(f"Ajout de l'alias 'champion' à {model_name} v{model_version} pour mise en Production")
     client.set_registered_model_alias(model_name, alias="champion", version=model_version)
+
+    model_uri = f"models:/{model_name}@champion"
+    return model_uri

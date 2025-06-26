@@ -12,13 +12,19 @@ from features.utils import log_progress, extract_images_features
 
 BATCH_ID =1  
 
-def build_images_features_func_from_mongo(batch_id,IMAGE_FOLDER="data/raw_data/images/image_train", model=None, preprocess=None, batch_size=10000):
+def build_images_features_func_from_mongo(for_predicting=False,batch_id=None,list_id=None, source="raw_data_batches", IMAGE_FOLDER="data/raw_data/images/image_train", model=None, preprocess=None, batch_size=10000):
     # Connexion Mongo
     client = MongoClient("mongodb://localhost:27017")
     db = client["MAR25_CMLOPS_RAKUTEN"]
 
-    # Chargement du batch depuis Mongo
-    raw_docs = db["raw_data_batches"].find({"batch_id": batch_id})
+    # Chargement du batch/liste depuis Mongo
+    if batch_id is not None:
+        raw_docs = db[source].find({"batch_id": batch_id})
+    elif list_id is not None:
+        raw_docs = db[source].find({"productid": {"$in": list_id}})
+    else:
+        raw_docs = db[source].find()
+
     df_raw = pl.DataFrame(list(raw_docs)).select(["imageid", "productid"])
     df_raw = df_raw.sort(["imageid", "productid"])
 
@@ -28,7 +34,10 @@ def build_images_features_func_from_mongo(batch_id,IMAGE_FOLDER="data/raw_data/i
     )
 
     # Filtrage : on retire les ID déjà présents dans image_features
-    existing_ids = db["image_features"].distinct("productid")
+    if for_predicting:
+        existing_ids = db["image_features_to_predict"].distinct("productid")
+    else:
+        existing_ids = db["image_features"].distinct("productid")
     existing_productids = set(existing_ids)
     df_filtered = df_raw.filter(~pl.col("productid").is_in(existing_productids))
 
@@ -67,8 +76,11 @@ def build_images_features_func_from_mongo(batch_id,IMAGE_FOLDER="data/raw_data/i
         final_df = final_df.with_columns(pl.lit(batch_id).alias("batch_id"))
 
         # Insertion dans Mongo
-        db["image_features"].insert_many(final_df.to_dicts())
-
+        if for_predicting:
+            db["image_features_to_predict"].insert_many(final_df.to_dicts())
+        else:
+            db["image_features"].insert_many(final_df.to_dicts())
+        
         print(f"Batch {batch_id} - {len(final_df)} images insérées dans Mongo")
         log_progress((i + batch_size) // batch_size, total_batches, start_time)
 

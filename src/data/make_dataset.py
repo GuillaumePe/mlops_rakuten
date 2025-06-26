@@ -1,7 +1,7 @@
 import polars as pl
 from pymongo import MongoClient
 import gc
-
+from sklearn.model_selection import train_test_split
 LIST_ID_COLUMNS = ["imageid", "productid"]
 BATCH_ID = 1
 
@@ -15,8 +15,6 @@ def make_dataset_from_batch(batch_id):
     if not batch_ids:
         print("Aucun ID trouvé pour ce batch.")
         return
-
-    id_df = pl.DataFrame(batch_ids)
 
     keys = [f"{row['imageid']}_{row['productid']}" for row in batch_ids]
 
@@ -37,11 +35,6 @@ def make_dataset_from_batch(batch_id):
     print("Jointure des features texte & image...")
     joined_df = text_df.join(image_df, on=LIST_ID_COLUMNS, how="inner")
     
-    
-
-    from sklearn.model_selection import train_test_split
-
-
     # Création du DataFrame cible
     print("Récupération des labels...")
     target_docs = db["Y_raw_data_batches"].find(

@@ -116,7 +116,7 @@ final_pipeline = Pipeline([
 
 # entrainement et export
 
-with mlflow.start_run(run_name=EXPERIMENT_NAME+"_"+"RUN_NAME"+"_"+"final_model_training_for_predicting"):
+with mlflow.start_run(run_name=EXPERIMENT_NAME+"_"+RUN_NAME+"_"+"final_model_training_for_predicting"):
     # Entraînement
     final_pipeline.fit(X_train, y_train)
     

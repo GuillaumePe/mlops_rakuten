@@ -15,7 +15,7 @@ import seaborn as sns
 import json
 import dagshub
 from pymongo import MongoClient
-from utils import get_or_create_experiment, objective_wrapper_pca, champion_callback, get_next_run_name
+from src.models.utils import get_or_create_experiment, objective_wrapper_pca, champion_callback, get_next_run_name
 
 
 # Paramètres
