@@ -10,9 +10,9 @@ from features.utils import extract_text_features_in_batches, clean_description, 
 
 BATCH_ID = 1  
 
-def build_text_features_func_from_mongo(for_predicting=False,batch_id=None,list_id=None, source="raw_data_batches", batch_size=10000):
+def build_text_features_func_from_mongo(for_predicting=False,batch_id=None,list_id=None, source="X_raw_data_batches", batch_size=10000):
     # Connexion Mongo
-    client = MongoClient("mongodb://localhost:27017")
+    client = MongoClient("mongodb://mongodb:27017")
     db = client["MAR25_CMLOPS_RAKUTEN"]
 
      # Chargement du batch/liste depuis Mongo

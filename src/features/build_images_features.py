@@ -12,9 +12,9 @@ from features.utils import log_progress, extract_images_features
 
 BATCH_ID =1  
 
-def build_images_features_func_from_mongo(for_predicting=False,batch_id=None,list_id=None, source="raw_data_batches", IMAGE_FOLDER="data/raw_data/images/image_train", model=None, preprocess=None, batch_size=10000):
+def build_images_features_func_from_mongo(for_predicting=False,batch_id=None,list_id=None, source="X_raw_data_batches", IMAGE_FOLDER="data/raw_data/images/image_train", model=None, preprocess=None, batch_size=10000):
     # Connexion Mongo
-    client = MongoClient("mongodb://localhost:27017")
+    client = MongoClient("mongodb://mongodb:27017")
     db = client["MAR25_CMLOPS_RAKUTEN"]
 
     # Chargement du batch/liste depuis Mongo

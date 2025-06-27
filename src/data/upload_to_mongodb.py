@@ -2,7 +2,7 @@ from pymongo import MongoClient
 import polars as pl
 import os
 
-client = MongoClient("mongodb://localhost:27017")
+client = MongoClient("mongodb://mongodb:27017")
 db = client["MAR25_CMLOPS_RAKUTEN"]
 
 def insert_file_to_collection(file_path, collection_name):
@@ -40,6 +40,11 @@ db["image_features"].delete_many({})
 # Insert image features
 for f in sorted(os.listdir("data/preprocessed/chunked_image_files")):
     insert_file_to_collection(f"data/preprocessed/chunked_image_files/" + f, "image_features")
+
+db["X_to_predict"].delete_many({})
+insert_file_to_collection("data/raw_data_test/X_test_update.csv", "X_to_predict")
+
+
 
 # Insert X final
 #insert_file_to_collection("data/preprocessed/final/X_train_processed_final.parquet", "X_train_final")

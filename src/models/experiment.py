@@ -25,13 +25,15 @@ LIST_ID_COLUMNS = ["imageid", "productid"]
 TARGET_COLUMN = "prdtypecode"
 n_trials_bayesian_search = 2
 ml_flow_experiment_name= "GP_optuna_lightgbm_stratified_ops"
-
+mlflow_tracking_uri = "http://mlflow:5000"
+mongodb_uri = "mongodb://mongodb:27017"
 # Connexion MongoDB
-client = MongoClient("mongodb://localhost:27017")
+client = MongoClient(mongodb_uri)
 db = client["MAR25_CMLOPS_RAKUTEN"]
 
 # Chargement X
 X = pd.DataFrame(list(db.X_train_final.find({}, {"_id": 0})))
+print(X)
 product_ids_in_X = set(X["productid"])
 
 # Chargement complet de Y
@@ -62,9 +64,10 @@ X_train, X_test, y_train, y_test = train_test_split(
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
 # Initialisation Dagshub
-dagshub.init(repo_owner=repo_owner, repo_name=repo_name, mlflow=True)
+#dagshub.init(repo_owner=repo_owner, repo_name=repo_name, mlflow=True)
 
-#MLflow 
+#MLflow
+mlflow.set_tracking_uri(mlflow_tracking_uri)
 experiment_id = get_or_create_experiment(ml_flow_experiment_name)
 run_name = get_next_run_name("attempt")
 

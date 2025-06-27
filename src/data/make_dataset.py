@@ -6,11 +6,11 @@ LIST_ID_COLUMNS = ["imageid", "productid"]
 BATCH_ID = 1
 
 def make_dataset_from_batch(batch_id):
-    client = MongoClient("mongodb://localhost:27017")
+    client = MongoClient("mongodb://mongodb:27017")
     db = client["MAR25_CMLOPS_RAKUTEN"]
 
     print(f"Chargement des IDs pour batch_id={batch_id}...")
-    raw_docs = db["raw_data_batches"].find({"batch_id": batch_id}, {"_id": 0, "imageid": 1, "productid": 1})
+    raw_docs = db["X_raw_data_batches"].find({"batch_id": batch_id}, {"_id": 0, "imageid": 1, "productid": 1})
     batch_ids = list(raw_docs)
     if not batch_ids:
         print("Aucun ID trouvé pour ce batch.")
