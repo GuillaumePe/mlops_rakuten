@@ -7,8 +7,10 @@ import polars as pl
 from pymongo import MongoClient
 from transformers import DistilBertTokenizerFast, DistilBertModel
 from features.utils import extract_text_features_in_batches, clean_description, log_progress
+import argparse
 
-BATCH_ID = 1  
+#BATCH_ID =batch_id
+
 
 def build_text_features_func_from_mongo(for_predicting=False,batch_id=None,list_id=None, source="X_raw_data_batches", batch_size=10000):
     # Connexion Mongo
@@ -79,4 +81,9 @@ def build_text_features_func_from_mongo(for_predicting=False,batch_id=None,list_
     print(f"Terminé pour batch {batch_id}.")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch_id', type=int, default=1)
+    args = parser.parse_args()
+
+    batch_id = args.batch_id
     build_text_features_func_from_mongo(batch_id=BATCH_ID)

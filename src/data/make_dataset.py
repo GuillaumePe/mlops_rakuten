@@ -2,8 +2,10 @@ import polars as pl
 from pymongo import MongoClient
 import gc
 from sklearn.model_selection import train_test_split
+import argparse
+
 LIST_ID_COLUMNS = ["imageid", "productid"]
-BATCH_ID = 1
+#BATCH_ID = batch_id
 
 def make_dataset_from_batch(batch_id):
     client = MongoClient("mongodb://mongodb:27017")
@@ -80,4 +82,9 @@ def make_dataset_from_batch(batch_id):
     print("Terminé.")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch_id', type=int, default=1)
+    args = parser.parse_args()
+
+    batch_id = args.batch_id
     make_dataset_from_batch(batch_id=BATCH_ID)

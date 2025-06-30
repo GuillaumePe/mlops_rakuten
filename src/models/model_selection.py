@@ -9,7 +9,7 @@ def select_and_promote_best_model(list_models_name= ["pca_lgbm_pipeline"], repo_
     #dagshub.init(repo_owner=repo_owner, repo_name=repo_name, mlflow=True)
     mlflow.set_tracking_uri("http://mlflow:5000")
     # Connexion MongoDB
-    client = MongoClient("mongodb://localhost:27017")
+    client = MongoClient("mongodb://mongodb:27017")
     db = client["MAR25_CMLOPS_RAKUTEN"]
     TARGET_COLUMN = "prdtypecode"
 

@@ -23,7 +23,8 @@ repo_owner = 'GuillaumePe'
 repo_name = 'mar25_cmlops_rakuten'
 LIST_ID_COLUMNS = ["imageid", "productid"]
 TARGET_COLUMN = "prdtypecode"
-n_trials_bayesian_search = 2
+n_trials_bayesian_search = 1
+
 ml_flow_experiment_name= "GP_optuna_lightgbm_stratified_ops"
 mlflow_tracking_uri = "http://mlflow:5000"
 mongodb_uri = "mongodb://mongodb:27017"

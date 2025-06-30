@@ -12,7 +12,7 @@ from src.features.build_images_features import build_images_features_func_from_m
 from src.features.build_text_features import build_text_features_func_from_mongo
 from src.models.model_selection import select_and_promote_best_model 
 from pymongo import MongoClient
-
+import traceback
 # Configuration
 SECRET_KEY = "rakuten_secret_key"  
 ALGORITHM = "HS256"
@@ -186,8 +186,24 @@ def predict(request_ids: PredictRequest_ids, user: dict = Depends(get_current_us
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur pendant la prédiction : {str(e)}")
 
+class PreprocessRequest(BaseModel):
+    batch_id: int
 
-@app.post("/retrain")
+@app.post("/preprocessing")
+def preprocess_data(request: PreprocessRequest, user: dict = Depends(get_current_user)):
+    batch_id = request.batch_id
+    try:
+        subprocess.run(["python", "-m", "src.features.build_images_features", "--batch_id", str(batch_id)], check=True)
+        subprocess.run(["python", "-m", "src.features.build_text_features", "--batch_id", str(batch_id)], check=True)
+        subprocess.run(["python", "-m", "src.data.make_dataset", "--batch_id", str(batch_id)], check=True)
+    except subprocess.CalledProcessError as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Erreur pipeline : {e}")
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/training")
 def retrain(user: dict = Depends(get_current_user)):
     global model
     try:
@@ -199,6 +215,8 @@ def retrain(user: dict = Depends(get_current_user)):
 
         return {"message": f"Réentraînement terminé. Modèle champion rechargé depuis {model_uri}"}
     except subprocess.CalledProcessError as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Erreur pipeline : {e}")
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

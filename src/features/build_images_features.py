@@ -9,8 +9,9 @@ from pymongo import MongoClient
 from torchvision import transforms
 from torchvision.models import resnet18, ResNet18_Weights
 from features.utils import log_progress, extract_images_features
+import argparse
 
-BATCH_ID =1  
+#BATCH_ID =1
 
 def build_images_features_func_from_mongo(for_predicting=False,batch_id=None,list_id=None, source="X_raw_data_batches", IMAGE_FOLDER="data/raw_data/images/image_train", model=None, preprocess=None, batch_size=10000):
     # Connexion Mongo
@@ -90,6 +91,11 @@ def build_images_features_func_from_mongo(for_predicting=False,batch_id=None,lis
     print(f"Terminé pour batch {batch_id}.")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch_id', type=int, default=1)
+    args = parser.parse_args()
+
+    batch_id = args.batch_id
     build_images_features_func_from_mongo(
-        batch_id=BATCH_ID 
+        batch_id=batch_id 
     )
