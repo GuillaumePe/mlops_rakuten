@@ -65,6 +65,7 @@ x-airflow-common: &airflow-common
     - ./src/airflow/dags:/opt/airflow/dags
     - ./docker/airflow/logs:/opt/airflow/logs
     - ./docker/airflow/plugins:/opt/airflow/plugins
+    - ./docker/airflow/init:/opt/airflow/init
   networks :
     - rakuten
 
@@ -104,49 +105,12 @@ services:
       - ./docker/postgres-init:/docker-entrypoint-initdb.d
     networks:
       - rakuten
-
-  mlflow:
-    build:
-      context: .
-      dockerfile: docker/mlflow/Dockerfile
-    container_name: mlflow
-    command: ["/wait-for-it.sh", "postgres", "5432", "--",
-      "mlflow", "server",
-      "--backend-store-uri=postgresql://mlflow:mlflowpwd@postgres:5432/mlflow_db",
-      "--default-artifact-root=/mlflow/mlruns",
-      "--host", "0.0.0.0",
-      "--port", "5000",
-      "--gunicorn-opts=--timeout=3600"]
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./mlruns:/mlflow/mlruns
-    depends_on:
-      - postgres
-    networks:
-      - rakuten
-
-  api:
-    build:
-      context: .
-      dockerfile: docker/api/Dockerfile
-    container_name: api
-    ports:
-      - "8000:8000"
-    volumes:
-      - .:/app
-      - ./.git:/app/.git
-      - ./mlruns:/mlflow/mlruns
-    environment:
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-      - MLFLOW_ARTIFACT_ROOT=/mlflow/mlruns
-      - PYTHONUNBUFFERED=1
-    depends_on:
-      - mongodb
-      - mlflow
-    networks:
-      - rakuten
-  
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
   mongo_initializer:
     build:
       context: .
@@ -221,6 +185,24 @@ services:
       _AIRFLOW_WWW_USER_CREATE: "true"
       _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
       _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+  
+  airflow-variable-init:
+    <<: *airflow-common
+    container_name: airflow-variable-init
+    command: >
+      bash -c "
+      echo 'Attente du webserver...';
+      until curl --fail http://airflow-webserver:8080/health; do sleep 20; done;
+      echo 'Webserver opérationnel, initialisation des variables Airflow...';
+      python /opt/airflow/init/init_variables.py
+      "
+    # depends_on:
+    #   airflow-webserver:
+    #     condition: service_healthy
+    #   api:
+    #     condition: service_healthy
+    # restart: always
+
 
   flower:
     <<: *airflow-common
@@ -234,12 +216,117 @@ services:
       retries: 5
     restart: always
 
+  mlflow:
+    build:
+      context: .
+      dockerfile: docker/mlflow/Dockerfile
+    container_name: mlflow
+    command: [
+      #"/wait-for-it.sh", "postgres", "5432", "--",
+      "mlflow", "server",
+      "--backend-store-uri=postgresql://mlflow:mlflowpwd@postgres:5432/mlflow_db",
+      "--default-artifact-root=/mlflow/mlruns",
+      "--host", "0.0.0.0",
+      "--port", "5000",
+      "--gunicorn-opts=--timeout=3600"]
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlruns:/mlflow/mlruns
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - rakuten
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: on-failure
+    
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    container_name: api
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ./.git:/app/.git
+      - ./mlruns:/mlflow/mlruns
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_ARTIFACT_ROOT=/mlflow/mlruns
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - rakuten
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+  
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    ports:
+      - 9090:9090
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+#      - '--storage.tsdb.retention.time=1d'
+    depends_on:
+      - api
+    networks:
+      - rakuten
+
+  grafana:
+    image: grafana/grafana
+    container_name: grafana_template_accidents
+    ports:
+      - 3000:3000
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - api
+    networks:
+      - rakuten
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    ports:
+      - "8085:8085"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    depends_on:
+      - api
+    networks:
+      - rakuten
 
 volumes:
-  postgres_data:
+  postgres_data:  {}
   mongo_data:
     external: true
     name: mar25_cmlops_rakuten_mongo_data
+  prometheus_data: {}
+  grafana_data: {}
 
 networks:
   rakuten:

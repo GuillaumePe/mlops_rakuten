@@ -1,0 +1,67 @@
+{
+  "id": null,
+  "title": "Dashboard de monitoring de l'APP modèle",
+  "timezone": "browser",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "F1-score (champion)",
+      "targets": [
+        {
+          "expr": "f1_score",
+          "interval": "",
+          "refId": "A"
+        }
+      ],
+      "id": 1
+    },
+    {
+      "type": "stat",
+      "title": "Version du modèle champion",
+      "targets": [
+        {
+          "expr": "model_version",
+          "interval": "",
+          "refId": "A"
+        }
+      ],
+      "id": 2
+    },
+    {
+      "type": "graph",
+      "title": "Temps d'entraînement (s)",
+      "targets": [
+        {
+          "expr": "rate(training_time_seconds_sum[1m])",
+          "refId": "A"
+        }
+      ],
+      "id": 3
+    },
+    {
+      "type": "graph",
+      "title": "Temps de prédiction (s)",
+      "targets": [
+        {
+          "expr": "rate(inference_time_seconds_sum[1m])",
+          "refId": "A"
+        }
+      ],
+      "id": 4
+    },
+    {
+      "type": "table",
+      "title": "Requêtes API par méthode/endpoint",
+      "targets": [
+        {
+          "expr": "sum(Nb_requetes) by (method, endpoint)",
+          "refId": "A"
+        }
+      ],
+      "id": 5
+    }
+  ],
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "10s"
+}

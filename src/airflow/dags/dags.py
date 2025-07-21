@@ -6,7 +6,7 @@ from pymongo import MongoClient
 import subprocess
 from datetime import timedelta
 import random
-
+from datetime import datetime
 # Appel au endpoint /login pour récupérer le token
 def get_auth_headers():
     username = Variable.get("api_username")
@@ -93,7 +93,7 @@ def predict():
 
         if selected_ids:
             payload = {"productid": selected_ids}
-            requests.post("http://api:8000/predict", json=payload,header=headers)
+            requests.post("http://api:8000/predict", json=payload,headers=headers)
 
     run_predict()
 

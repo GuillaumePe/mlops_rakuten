@@ -18,7 +18,13 @@ BEGIN
 END
 $$;
 
-CREATE DATABASE mlflow_db OWNER mlflow;
+DO $$
+BEGIN
+   IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'mlflow_db') THEN
+      CREATE DATABASE mlflow_db OWNER mlflow;
+   END IF;
+END
+$$;
 GRANT ALL PRIVILEGES ON DATABASE mlflow_db TO mlflow;
 
 -- Donner les permissions sur les schémas pour Airflow

@@ -86,4 +86,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     batch_id = args.batch_id
-    build_text_features_func_from_mongo(batch_id=BATCH_ID)
+    build_text_features_func_from_mongo(batch_id=batch_id)

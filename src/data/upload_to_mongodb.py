@@ -1,7 +1,9 @@
+print("Script upload_to_mongodb.py lancé")
+import sys
+print(sys.version)
 from pymongo import MongoClient
 import polars as pl
 import os
-
 client = MongoClient("mongodb://mongodb:27017")
 db = client["MAR25_CMLOPS_RAKUTEN"]
 
@@ -26,24 +28,28 @@ def insert_file_to_collection(file_path, collection_name):
 db["X_raw_data_batches"].delete_many({})
 for i in range(1, 5):
     insert_file_to_collection(f"data/raw_data/batches/X_train_batch_{i}.csv", "X_raw_data_batches")
+print(f"{db['X_raw_data_batches'].count_documents({})} documents dans X_raw_data_batches")
 
 db["Y_raw_data_batches"].delete_many({})
 for i in range(1, 5):
     insert_file_to_collection(f"data/raw_data/batches/Y_train_batch_{i}.csv", "Y_raw_data_batches")
+print(f"{db['Y_raw_data_batches'].count_documents({})} documents dans Y_raw_data_batches")
 
 db["text_features"].delete_many({})
 # Insert text features
 for f in sorted(os.listdir("data/preprocessed/chunked_text_files")):
     insert_file_to_collection(f"data/preprocessed/chunked_text_files/" + f, "text_features")
+print(f"{db['text_features'].count_documents({})} documents dans text_features")
 
 db["image_features"].delete_many({})
 # Insert image features
 for f in sorted(os.listdir("data/preprocessed/chunked_image_files")):
     insert_file_to_collection(f"data/preprocessed/chunked_image_files/" + f, "image_features")
+print(f"{db['image_features'].count_documents({})} documents dans image_features")
 
 db["X_to_predict"].delete_many({})
 insert_file_to_collection("data/raw_data_test/X_test_update.csv", "X_to_predict")
-
+print(f"{db['X_to_predict'].count_documents({})} documents dans X_to_predict")
 
 
 # Insert X final

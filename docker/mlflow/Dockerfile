@@ -1,7 +1,7 @@
 FROM ghcr.io/mlflow/mlflow:latest
 
 USER root
-RUN apt-get update && apt-get install -y git gcc libpq-dev netcat && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git gcc libpq-dev netcat curl &&  rm -rf /var/lib/apt/lists/*
 
 RUN pip install psycopg2-binary
 

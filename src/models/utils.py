@@ -299,3 +299,29 @@ def promotion_exclusive_best_model_to_production(model_name, model_version):
 
     model_uri = f"models:/{model_name}@champion"
     return model_uri
+
+def get_f1_score_from_model_uri(model_uri: str, metric_name: str = "f1_score") -> float:
+    try:
+        if not model_uri.startswith("models:/") or "@" not in model_uri:
+            raise ValueError(f"Format de model_uri non supporté : {model_uri}")
+
+        # Extraire nom du modèle et alias dynamiquement
+        uri_body = model_uri[len("models:/"):]
+        model_name, alias = uri_body.split("@")
+
+        # Accéder au run ID via le model registry
+        client = mlflow.tracking.MlflowClient()
+        version_info = client.get_model_version_by_alias(model_name, alias)
+        run_id = version_info.run_id
+
+        # Récupérer la métrique depuis le run
+        run_data = client.get_run(run_id).data.metrics
+        f1_score = run_data.get(metric_name)
+
+        if f1_score is None:
+            raise ValueError(f"Métrique '{metric_name}' non trouvée dans le run {run_id}")
+        
+        return f1_score
+
+    except Exception as e:
+        raise RuntimeError(f"Erreur lors de la récupération du f1-score depuis {model_uri} : {e}")

@@ -1,6 +1,6 @@
 from pymongo import MongoClient
-
-client = MongoClient("mongodb://localhost:27017")
+print("Lancement de reboot.py")
+client = MongoClient("mongodb://mongodb:27017")
 db = client["MAR25_CMLOPS_RAKUTEN"]
 
 # Supprime la collection X_train_final

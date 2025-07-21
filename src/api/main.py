@@ -11,7 +11,12 @@ from mlflow.tracking import MlflowClient
 from src.features.build_images_features import build_images_features_func_from_mongo
 from src.features.build_text_features import build_text_features_func_from_mongo
 from src.models.model_selection import select_and_promote_best_model 
+from src.models.utils import get_f1_score_from_model_uri
 from pymongo import MongoClient
+from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_client import Summary, Gauge, Counter
+
+
 import traceback
 # Configuration
 SECRET_KEY = "rakuten_secret_key"  
@@ -73,8 +78,21 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 app = FastAPI()
 mlflow.set_tracking_uri(Mlflow_tracking_uri)
 
-@app.get("/")
+#Définitions des métriques pour prometheus
+Instrumentator().instrument(app).expose(app)
+
+inference_time_summary = Summary('inference_time_seconds', 'Temps de Prédiction')
+training_time_summary = Summary('training_time_seconds', "Temps d'entrainement du modèle")
+f1_score_gauge = Gauge("f1_score","f1_score du modèle en production")
+nb_of_requests_counter = Counter(name='Nb_requetes',
+                                 documentation="Nombre de requetes",
+                                 labelnames=['method', 'endpoint'])
+model_version_gauge = Gauge("model_version", "Version du modèle champion")
+
+
+@app.get("/health")
 def read_root():
+    nb_of_requests_counter.labels(method='GET', endpoint='/health').inc()
     return {"message": "API modèle ML Rakuten online"}
 
 # Initialisation Dagshub
@@ -111,6 +129,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     if not user:
         raise HTTPException(status_code=400, detail="Identifiants invalides")
     access_token = create_access_token(data={"sub": user["username"]})
+    nb_of_requests_counter.labels(method='POST', endpoint='/login').inc()
     return {"access_token": access_token, "token_type": "bearer"}
 
 model, model_name_loaded, model_version = get_champion_model()
@@ -134,28 +153,29 @@ def predict(request_ids: PredictRequest_ids, user: dict = Depends(get_current_us
         if excluded_productids:
             print(f"{len(excluded_productids)} productid sur {len(request_ids_set)} ne se trouvent pas dans la base X_to_predict")
 
-        #Pré-processing
-        build_images_features_func_from_mongo(for_predicting=True, list_id=filtered_ids_list, source="raw_data_for_prediction", IMAGE_FOLDER="data/raw_data_test/images_test")
-        build_text_features_func_from_mongo(for_predicting=True, list_id=filtered_ids_list, source="raw_data_for_prediction")
+        with inference_time_summary.time():
+            #Pré-processing
+            build_images_features_func_from_mongo(for_predicting=True, list_id=filtered_ids_list, source="raw_data_for_prediction", IMAGE_FOLDER="data/raw_data_test/images_test")
+            build_text_features_func_from_mongo(for_predicting=True, list_id=filtered_ids_list, source="raw_data_for_prediction")
         
             # Texte
-        print("Filtrage des features texte...")
-        text_docs = db["text_features_to_predict"].find({"productid": {"$in": filtered_ids_list}}, {"_id": 0})
-        text_df = pd.DataFrame(list(text_docs))
+            print("Filtrage des features texte...")
+            text_docs = db["text_features_to_predict"].find({"productid": {"$in": filtered_ids_list}}, {"_id": 0})
+            text_df = pd.DataFrame(list(text_docs))
 
             # Images
-        print("Filtrage des features image...")
-        image_docs = db["image_features_to_predict"].find({"productid": {"$in": filtered_ids_list}}, {"_id": 0})
-        image_df = pd.DataFrame(list(image_docs))
+            print("Filtrage des features image...")
+            image_docs = db["image_features_to_predict"].find({"productid": {"$in": filtered_ids_list}}, {"_id": 0})
+            image_df = pd.DataFrame(list(image_docs))
 
-        if text_df.empty or image_df.empty:
-            raise HTTPException(status_code=400, detail="Données incomplètes pour certaines images ou textes.")
+            if text_df.empty or image_df.empty:
+                raise HTTPException(status_code=400, detail="Données incomplètes pour certaines images ou textes.")
 
-        #Construction du data input pour prédiction
-        joined_df = text_df.merge(image_df, on="productid", how="inner")
+            #Construction du data input pour prédiction
+            joined_df = text_df.merge(image_df, on="productid", how="inner")
         
-        #Prédiction
-        preds = model.predict(joined_df)
+            #Prédiction
+            preds = model.predict(joined_df)
         
         #Enregistrement des prédictions dans la base MongoDB
         now = datetime.now().isoformat()
@@ -177,6 +197,7 @@ def predict(request_ids: PredictRequest_ids, user: dict = Depends(get_current_us
 
             if prediction_records:
                 db["Prediction"].insert_many(prediction_records)
+            nb_of_requests_counter.labels(method='POST', endpoint='/predict').inc()
         return {
             "message": f"{len(prediction_records)} prédictions faites sur {len(filtered_ids_list)} produits.",
             "nb_exclus": len(excluded_productids),
@@ -207,13 +228,24 @@ def preprocess_data(request: PreprocessRequest, user: dict = Depends(get_current
 def retrain(user: dict = Depends(get_current_user)):
     global model
     try:
-        # Réentraînement du modèle
-        subprocess.run(["python", "-m", "src.models.experiment"], check=True)
-        # Sélection + Promotion + récupération du modèle champion
-        model_uri = select_and_promote_best_model(list_models_name=["pca_lgbm_pipeline"])
-        model = mlflow.pyfunc.load_model(model_uri)
-
-        return {"message": f"Réentraînement terminé. Modèle champion rechargé depuis {model_uri}"}
+        with training_time_summary.time():
+            # Réentraînement du modèle
+            subprocess.run(["python", "-m", "src.models.experiment"], check=True)
+            # Sélection + Promotion + récupération du modèle champion
+            model_uri = select_and_promote_best_model(list_models_name=["pca_lgbm_pipeline"])
+            model = mlflow.pyfunc.load_model(model_uri)
+        # Récupération de la version depuis l'alias "champion"
+        client = MlflowClient()
+        model_name = model_uri.split("models:/")[1].split("@")[0]
+        version_info = client.get_model_version_by_alias(model_name, "champion")
+        model_version = version_info.version
+        model_version_gauge.set(float(model_version))
+        # Récupérer le f1-score dynamiquement
+        f1_score = get_f1_score_from_model_uri(model_uri)
+        f1_score_gauge.set(f1_score) 
+        nb_of_requests_counter.labels(method='POST', endpoint='/training').inc()               
+        return {"message": f"Réentraînement terminé. Modèle champion rechargé depuis {model_uri}",
+                "f1_score": f1_score}
     except subprocess.CalledProcessError as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Erreur pipeline : {e}")

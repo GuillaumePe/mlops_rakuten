@@ -143,7 +143,7 @@ with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=Tru
       artifact_path="model",
       registered_model_name="pca_lgbm_pipeline"
   )
-  mlflow.log_metric("optuna_best_model", f1_finale)
+  mlflow.log_metric("f1_score", f1_finale)
 
  # Confusion matrix
   cm = confusion_matrix(y_test, y_pred_finale)

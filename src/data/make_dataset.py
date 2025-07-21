@@ -87,4 +87,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     batch_id = args.batch_id
-    make_dataset_from_batch(batch_id=BATCH_ID)
+    make_dataset_from_batch(batch_id=batch_id)
