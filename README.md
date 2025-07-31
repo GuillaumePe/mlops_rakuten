@@ -54,7 +54,7 @@
       <a href="#about-the-project">About the project </a>
       <ul>
         <li><a href="#built-with">Built with</a></li>
-        <li><a href="#built-with">APP global architecture </a></li>
+        <li><a href="#app-global-architecture"">APP global architecture </a></li>
       </ul>
     </li>
     <li>
@@ -77,7 +77,7 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-[![Product Name Screen Shot][product-screenshot]
+[![Product Name Screen Shot]][product-screenshot]
 
 This repo contains the work that has been done for my Datascientest MLOps training camp final project. It relies on the challenge data : https://challengedata.ens.fr/challenges/35. 
 The challenge consists of a multimodal classification task on a large product catalog from the Rakuten marketplace.
@@ -107,6 +107,7 @@ Additionally, it's important to note that the target classes in the training dat
 
 ### APP global architecture 
 
+[![APP Architecture Screen Shot]][app-architecture-screenshot]
 <!-- GETTING STARTED -->
 ## Getting Started
 
@@ -159,7 +160,51 @@ To run this project, you need to have the following tools installed:
 
 
 
-<!-- USAGE EXAMPLES -->
+## Project Organization
+
+├── LICENSE
+├── README.md                  <- Main README for the project.
+├── docker-compose.yml         <- Docker Compose file to orchestrate all services.
+├── setup.sh / wait-for-it.sh  <- Startup and service readiness scripts.
+├── .env                       <- Environment variables used by Docker and the application.
+├── requirements.txt           <- Python dependencies list for the venv which was used for the dev.
+│
+├── data/                      <- Dataset folders (used by pipeline and API).
+│   ├── explored_data/         <- Data used in exploratory analysis.
+│   ├── preprocessed/          <- Cleaned and feature-engineered data.
+│   ├── raw_data/              <- Original training data and batch files.
+│   │   └── batches_for_prediction/
+│   ├── raw_data_test/         <- Inference test data + test images.
+│
+├── docker/                    <- Docker configurations for each component.
+│   ├── airflow/               <- Airflow setup (dags, logs, init, plugins).
+│   ├── api/                   <- API Dockerfile and requirements.
+│   ├── mlflow/                <- MLflow server Dockerfile.
+│   ├── mongo_initializer/     <- Container to load MongoDB with initial data.
+│   ├── postgres-init/         <- SQL script to init PostgreSQL.
+│
+├── grafana/                   <- Grafana provisioning setup.
+│   └── provisioning/
+│       ├── dashboards/        <- Predefined dashboards (JSON).
+│       └── datasources/       <- Default datasource config.
+│
+├── images/                    <- Project or README-related images (e.g. architecture diagram).
+├── mlruns/                    <- MLflow artifact storage (runs, models, metrics).
+├── notebooks/                 <- Jupyter notebooks (EDA, training experiments, etc).
+│
+├── prometheus/                <- Prometheus configuration files.
+│   └── prometheus.yml         <- Metric scraping rules.
+│
+├── src/                       <- Source code for the ML pipeline and API.
+│   ├── airflow/dags/          <- Airflow DAGs for pipeline orchestration.
+│   ├── api/                   <- FastAPI code for model inference.
+│   │   └── main.py            <- Entry point of the API.
+│   ├── data/                  <- Dataset handling and ingestion utilities.
+│   ├── features/              <- Feature engineering scripts.
+│   ├── models/                <- Model training and evaluation logic.
+
+
+
 ## Usage
 
 Use this space to show useful examples of how a project can be used. Additional screenshots, code examples and demos work well in this space. You may also link to more resources.
@@ -167,45 +212,6 @@ Use this space to show useful examples of how a project can be used. Additional 
 _For more examples, please refer to the [Documentation](https://example.com)_
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
-
-<!-- ROADMAP -->
-## Roadmap
-
-- [ ] Feature 1
-- [ ] Feature 2
-- [ ] Feature 3
-    - [ ] Nested Feature
-
-See the [open issues](https://github.com/github_username/repo_name/issues) for a full list of proposed features (and known issues).
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
-
-<!-- CONTRIBUTING -->
-## Contributing
-
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
-
-If you have a suggestion that would make this better, please fork the repo and create a pull request. You can also simply open an issue with the tag "enhancement".
-Don't forget to give the project a star! Thanks again!
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-### Top contributors:
-
-<a href="https://github.com/github_username/repo_name/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=github_username/repo_name" alt="contrib.rocks image" />
-</a>
-
 
 
 <!-- LICENSE -->
@@ -253,7 +259,7 @@ Project Link: [https://github.com/github_username/repo_name](https://github.com/
 [license-url]: https://github.com/DataScientest-Studio/mar25_cmlops_rakuten/blob/main/LICENSE
 
 [linkedin-shield]: https://img.shields.io/badge/LinkedIn-Connect-blue.svg?style=for-the-badge&logo=linkedin
-[linkedin-url]: https://www.linkedin.com/in/guillaume-pedron-9a3316117/  <!-- Remplace cette URL si nécessaire -->
+[linkedin-url]: https://www.linkedin.com/in/guillaume-pedron-9a3316117/  
 
 [Python-badge]: https://img.shields.io/badge/Python-3.x-blue.svg?style=for-the-badge&logo=python
 [Python-url]: https://www.python.org/
@@ -292,57 +298,5 @@ Project Link: [https://github.com/github_username/repo_name](https://github.com/
 [Torchvision-url]: https://pytorch.org/vision/
 
 [product-screenshot]: images/datascientest.png
+[app-architecture-screenshot]: images/architecture_app_rakuten.png
 
-Project Name
-==============================
-
-This project is a starting Pack for MLOps projects based on the subject "movie_recommandation". It's not perfect so feel free to make some modifications on it.
-
-Project Organization
-------------
-
-    ├── LICENSE
-    ├── README.md          <- The top-level README for developers using this project.
-    ├── data
-    │   ├── external       <- Data from third party sources.
-    │   ├── interim        <- Intermediate data that has been transformed.
-    │   ├── processed      <- The final, canonical data sets for modeling.
-    │   └── raw            <- The original, immutable data dump.
-    │
-    ├── logs               <- Logs from training and predicting
-    │
-    ├── models             <- Trained and serialized models, model predictions, or model summaries
-    │
-    ├── notebooks          <- Jupyter notebooks. Naming convention is a number (for ordering),
-    │                         the creator's initials, and a short `-` delimited description, e.g.
-    │                         `1.0-jqp-initial-data-exploration`.
-    │
-    ├── references         <- Data dictionaries, manuals, and all other explanatory materials.
-    │
-    ├── reports            <- Generated analysis as HTML, PDF, LaTeX, etc.
-    │   └── figures        <- Generated graphics and figures to be used in reporting
-    │
-    ├── requirements.txt   <- The requirements file for reproducing the analysis environment, e.g.
-    │                         generated with `pip freeze > requirements.txt`
-    │
-    ├── src                <- Source code for use in this project.
-    │   ├── __init__.py    <- Makes src a Python module
-    │   │
-    │   ├── data           <- Scripts to download or generate data
-    │   │   └── make_dataset.py
-    │   │
-    │   ├── features       <- Scripts to turn raw data into features for modeling
-    │   │   └── build_features.py
-    │   │
-    │   ├── models         <- Scripts to train models and then use trained models to make
-    │   │   │                 predictions
-    │   │   ├── predict_model.py
-    │   │   └── train_model.py
-    │   │
-    │   ├── visualization  <- Scripts to create exploratory and results oriented visualizations
-    │   │   └── visualize.py
-    │   └── config         <- Describe the parameters used in train_model.py and predict_model.py
-
---------
-
-<p><small>Project based on the <a target="_blank" href="https://drivendata.github.io/cookiecutter-data-science/">cookiecutter data science project template</a>. #cookiecutterdatascience</small></p>
