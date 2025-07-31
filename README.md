@@ -88,20 +88,36 @@ Additionally, it's important to note that the target classes in the training dat
 
 
 
+
+[Optuna-badge]: https://img.shields.io/badge/Optuna-EEE.svg?style=for-the-badge&logo=optuna&logoColor=black
+[Optuna-url]: https://optuna.org/
+
+[PyTorch-badge]: https://img.shields.io/badge/PyTorch-EE4C2C.svg?style=for-the-badge&logo=pytorch&logoColor=white
+[PyTorch-url]: https://pytorch.org/
+
+[Torchvision-badge]: https://img.shields.io/badge/Torchvision-FF9900.svg?style=for-the-badge
+[Torchvision-url]: https://pytorch.org/vision/
+
+[product-screenshot]: images/datascientest.png
+[app-architecture-screenshot]: images/architecture_app_rakuten.png
+
+
+
 ### Built With
 
-* [![Python][Python-badge]][Python-url]
-* [![Docker][Docker-badge]][Docker-url]
-* [![Apache Airflow][Airflow-badge]][Airflow-url]
-* [![PostgreSQL][Postgres-badge]][Postgres-url]
-* [![MongoDB][MongoDB-badge]][MongoDB-url]
-* [![Prometheus][Prometheus-badge]][Prometheus-url]
-* [![Grafana][Grafana-badge]][Grafana-url]
-* [![cAdvisor][cAdvisor-badge]][cAdvisor-url]
-* [![MLflow][MLflow-badge]][MLflow-url]
-* [![Optuna][Optuna-badge]][Optuna-url]
-* [![PyTorch][PyTorch-badge]][PyTorch-url]
-* [![Torchvision][Torchvision-badge]][Torchvision-url]
+<p align="center">
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.x-blue.svg?style=for-the-badge&logo=python" /></a>
+  <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/Docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white" /></a>
+  <a href="https://airflow.apache.org/"><img src="https://img.shields.io/badge/Airflow-2.x-blue.svg?style=for-the-badge&logo=apacheairflow" /></a>
+  <a href="https://www.postgresql.org/"><img src="https://img.shields.io/badge/PostgreSQL-316192.svg?style=for-the-badge&logo=postgresql&logoColor=white" /></a>
+  <a href="https://www.mongodb.com/"><img src="https://img.shields.io/badge/MongoDB-4EA94B.svg?style=for-the-badge&logo=mongodb&logoColor=white" /></a>
+  <a href="https://grafana.com/"><img src="https://img.shields.io/badge/Grafana-F46800.svg?style=for-the-badge&logo=grafana&logoColor=white" /></a>
+  <a href="https://github.com/google/cadvisor"><img src="https://img.shields.io/badge/cAdvisor-007ACC.svg?style=for-the-badge" /></a>
+  <a href="https://mlflow.org/"><img src="https://img.shields.io/badge/MLflow-0194E2.svg?style=for-the-badge" /></a>
+  <a href="https://optuna.org/"><img src="https://img.shields.io/badge/Optuna-EEE.svg?style=for-the-badge&logo=optuna&logoColor=black" /></a>
+  <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-EE4C2C.svg?style=for-the-badge&logo=pytorch&logoColor=white" /></a>
+  <a href="https://pytorch.org/vision/"><img src="https://img.shields.io/badge/Torchvision-FF9900.svg?style=for-the-badge" /></a>
+</p>
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -119,13 +135,13 @@ These instructions will help you set up the project in a local environment using
 ### Prerequisites
 
 To run this project, you need to have the following tools installed:
-* git
+- **Git**  
   Install Git from https://git-scm.com
   Or via terminal:
   ```sh
   sudo apt-get install git  
   ```
-* Docker & Docker-compose
+- **Docker & Docker-compose** 
   Install Docker from https://www.docker.com/get-started
  
 
@@ -164,7 +180,7 @@ To run this project, you need to have the following tools installed:
 
 
 ## Project Organization
-
+```sh
 ├── LICENSE
 ├── README.md                  <- Main README for the project.
 ├── docker-compose.yml         <- Docker Compose file to orchestrate all services.
@@ -205,7 +221,7 @@ To run this project, you need to have the following tools installed:
 │   ├── data/                  <- Dataset handling and ingestion utilities.
 │   ├── features/              <- Feature engineering scripts.
 │   ├── models/                <- Model training and evaluation logic.
-
+```
 
 
 ## Usage
