@@ -127,12 +127,13 @@ Additionally, it's important to note that the target classes in the training dat
 <div align="center">
   <img src="images/architecture_app_rakuten.png" alt="app-global-architecture" width="720" height="720">
   </a>
-<!-- GETTING STARTED -->
-## Getting Started
+
+
+### Getting Started
 
 These instructions will help you set up the project in a local environment using Docker and Docker Compose. All services (ML pipeline, database, monitoring, etc.) are containerized for easy reproducibility.
 
-### Prerequisites
+## Prerequisites
 
 To run this project, you need to have the following tools installed:
 - **Git**  
@@ -145,7 +146,7 @@ To run this project, you need to have the following tools installed:
   Install Docker from https://www.docker.com/get-started
  
 
-### Installation
+## Installation
 
 1. Clone the repo
    ```sh
@@ -179,7 +180,7 @@ To run this project, you need to have the following tools installed:
 
 
 
-## Project Organization
+### Project Organization
 ```sh
 ├── LICENSE
 ├── README.md                  <- Main README for the project.
@@ -224,7 +225,7 @@ To run this project, you need to have the following tools installed:
 ```
 
 
-## Usage
+### Usage
 
 Use this space to show useful examples of how a project can be used. Additional screenshots, code examples and demos work well in this space. You may also link to more resources.
 
@@ -234,7 +235,7 @@ _For more examples, please refer to the [Documentation](https://example.com)_
 
 
 <!-- LICENSE -->
-## License
+### License
 
 Distributed under the project_license. See `LICENSE.txt` for more information.
 
@@ -243,7 +244,7 @@ Distributed under the project_license. See `LICENSE.txt` for more information.
 
 
 <!-- CONTACT -->
-## Contact
+### Contact
 
 Your Name - [@twitter_handle](https://twitter.com/twitter_handle) - email@email_client.com
 
@@ -254,7 +255,7 @@ Project Link: [https://github.com/github_username/repo_name](https://github.com/
 
 
 <!-- ACKNOWLEDGMENTS -->
-## Acknowledgments
+### Acknowledgments
 
 * []()
 * []()
