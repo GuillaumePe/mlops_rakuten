@@ -54,7 +54,7 @@
       <a href="#about-the-project">About the project </a>
       <ul>
         <li><a href="#built-with">Built with</a></li>
-        <li><a href="#app-global-architecture"">APP global architecture </a></li>
+        <li><a href="#app-global-architecture">APP global architecture </a></li>
       </ul>
     </li>
     <li>
@@ -64,7 +64,7 @@
         <li><a href="#installation">installation</a></li>
       </ul>
     </li>
-    <li><a href="#Project Organization">Project Organization</a></li>
+    <li><a href="#project_organization">Project Organization</a></li>
     <li><a href="#usage">Usage</a></li>
     
     <li><a href="#license">License</a></li>
