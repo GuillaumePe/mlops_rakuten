@@ -8,7 +8,7 @@ from pymongo import MongoClient
 from transformers import DistilBertTokenizerFast, DistilBertModel
 from features.utils import extract_text_features_in_batches, clean_description, log_progress
 import argparse
-
+import numpy as np
 #BATCH_ID =batch_id
 
 
@@ -61,6 +61,13 @@ def build_text_features_func_from_mongo(for_predicting=False,batch_id=None,list_
         texts = sub_data["full_text"].to_list()
 
         embeddings = extract_text_features_in_batches(texts, tokenizer=tokenizer, model=model)
+        print(f"[DEBUG] Nb de textes à encoder : {len(texts)}")
+        print(f"[DEBUG] Shape embeddings texte : {embeddings.shape}")
+
+        nan_rows = [i for i in range(embeddings.shape[0]) if np.isnan(embeddings[i]).any()]
+        if nan_rows:
+            print(f"[ALERTE] {len(nan_rows)} embeddings texte contiennent des NaN !")
+
         columns = [f"text_feat_{j}" for j in range(embeddings.shape[1])]
         features_pl = pl.DataFrame(embeddings, schema=columns)
 

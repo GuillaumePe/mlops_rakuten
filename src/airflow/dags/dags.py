@@ -7,6 +7,7 @@ import subprocess
 from datetime import timedelta
 import random
 from datetime import datetime
+from airflow.exceptions import AirflowSkipException
 # Appel au endpoint /login pour récupérer le token
 def get_auth_headers():
     username = Variable.get("api_username")
@@ -22,7 +23,7 @@ def get_auth_headers():
 # DAG 1: Batch Training toutes les 2 heures
 @dag(
     dag_id="Training",
-    schedule_interval="0 */2 * * *",
+    schedule_interval="0 */1 * * *",
     start_date=days_ago(1),
     tags=["Datascientest","MAR25_CMLOPS_RAKUTEN"],
     catchup=False
@@ -31,6 +32,7 @@ def batch_training():
 
     @task()
     def set_batch_id_and_preprocessing():
+        Variable.set("is_training_running", "true")
         headers = get_auth_headers()
         batch_id = int(Variable.get("batch_id", 0)) + 1
         Variable.set("batch_id", str(batch_id))
@@ -40,11 +42,8 @@ def batch_training():
     @task()
     def trigger_training():
         headers = get_auth_headers()
-        try:
-            Variable.set("is_training_running", "true")
-            requests.post("http://api:8000/training",headers=headers)
-        finally:
-            Variable.set("is_training_running", "false")
+        requests.post("http://api:8000/training",headers=headers)
+        
         
     
     @task()
@@ -52,11 +51,11 @@ def batch_training():
         headers = get_auth_headers()
         client = MongoClient("mongodb://mongodb:27017")
         db = client["MAR25_CMLOPS_RAKUTEN"]
-        all_ids = [doc["productid"] for doc in db["X_to_predict"].find({}, {"productid":1})]
+        all_ids = [doc["productid"] for doc in db["Prediction"].find({}, {"productid":1})]
         if all_ids:
             payload = {"productid": all_ids}
             requests.post("http://api:8000/predict", json=payload,headers=headers)
-
+        Variable.set("is_training_running", "false")
     set_batch_id_and_preprocessing() >> trigger_training() >> predict_full_after_training()
 
 batch_training_instance = batch_training()
@@ -75,7 +74,7 @@ def predict():
     def run_predict():
         headers = get_auth_headers()
         if Variable.get("is_training_running", default_var="false") == "true":
-            return
+            raise AirflowSkipException("Training en cours, skipping le run de prédiction.")
 
         client = MongoClient("mongodb://mongodb:27017")
         db = client["MAR25_CMLOPS_RAKUTEN"]
@@ -88,13 +87,20 @@ def predict():
         # Différence = les productid encore disponibles
         available_ids = list(x_to_predict_ids - predicted_ids)
 
-        sample_size = int(Variable.get("predict_sample_size", 100))
+        sample_size = int(Variable.get("predict_sample_size", 10))
         selected_ids = random.sample(available_ids, min(sample_size, len(available_ids)))
 
         if selected_ids:
             payload = {"productid": selected_ids}
-            requests.post("http://api:8000/predict", json=payload,headers=headers)
+            response  = requests.post("http://api:8000/predict", json=payload,headers=headers)
+        
+        if response.status_code != 200:
+            raise Exception(f"Erreur API : {response.status_code}, {response.text}")
+        
+        result = response.json()
+        print("Résultat de la prédiction :", result)
 
+        return result
     run_predict()
 
 predict_instance = predict()

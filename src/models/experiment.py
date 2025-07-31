@@ -16,14 +16,14 @@ import json
 import dagshub
 from pymongo import MongoClient
 from src.models.utils import get_or_create_experiment, objective_wrapper_pca, champion_callback, get_next_run_name
-
+import gc
 
 # Paramètres
 repo_owner = 'GuillaumePe'
 repo_name = 'mar25_cmlops_rakuten'
 LIST_ID_COLUMNS = ["imageid", "productid"]
 TARGET_COLUMN = "prdtypecode"
-n_trials_bayesian_search = 1
+n_trials_bayesian_search = 2
 
 ml_flow_experiment_name= "GP_optuna_lightgbm_stratified_ops"
 mlflow_tracking_uri = "http://mlflow:5000"
@@ -61,8 +61,10 @@ num_class = y.nunique()
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, stratify=y, test_size=0.20, random_state=42
 )
+del X, Y, y, Y_all
+gc.collect()
 # Stratified CV
-skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
 
 # Initialisation Dagshub
 #dagshub.init(repo_owner=repo_owner, repo_name=repo_name, mlflow=True)
@@ -80,8 +82,8 @@ with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=Tru
   study = optuna.create_study(direction="maximize")
   
   hyperparameters = {
-    "preprocessor__text__pca__n_components": ("int", 150, 250),
-    "preprocessor__image__pca__n_components": ("int", 150, 250),
+    "preprocessor__text__pca__n_components": ("int", 10, 50),
+    "preprocessor__image__pca__n_components": ("int", 10, 50),
     "lgbm__max_depth": ("int", 3, 15),
     "lgbm__num_leaves": ("int", 50, 150),
     "lgbm__learning_rate": ("float", 0.005, 0.2),
@@ -123,10 +125,10 @@ with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=Tru
   # Final Pipeline
   text_pipeline = Pipeline([
              ("scaler", StandardScaler()),
-             ("pca", PCA(n_components=best_params.pop("preprocessor__text__pca__n_components")))])
+             ("pca", PCA(n_components=best_params.pop("preprocessor__text__pca__n_components"),svd_solver="randomized"))])
   image_pipeline = Pipeline([
              ("scaler", StandardScaler()),
-             ("pca", PCA(n_components=best_params.pop("preprocessor__image__pca__n_components")))])
+             ("pca", PCA(n_components=best_params.pop("preprocessor__image__pca__n_components"),svd_solver="randomized"))])
   preprocessor = ColumnTransformer([
              ("text", text_pipeline, text_feat_cols),
              ("image", image_pipeline, image_feat_cols)])

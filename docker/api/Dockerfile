@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt && pip install --no-cache-dir
 
 # Copie du code source
 COPY src/ ./src/
-COPY docker/api/requirements.api.txt ./requirements.txt
+
 
 # Exposition du port FastAPI
 EXPOSE 8000

@@ -10,7 +10,7 @@ from torchvision import transforms
 from torchvision.models import resnet18, ResNet18_Weights
 from features.utils import log_progress, extract_images_features
 import argparse
-
+import numpy as np
 #BATCH_ID =1
 
 def build_images_features_func_from_mongo(for_predicting=False,batch_id=None,list_id=None, source="X_raw_data_batches", IMAGE_FOLDER="data/raw_data/images/image_train", model=None, preprocess=None, batch_size=10000):
@@ -70,6 +70,17 @@ def build_images_features_func_from_mongo(for_predicting=False,batch_id=None,lis
 
         # Extraction features
         all_embeddings = extract_images_features(input_dir=IMAGE_FOLDER, image_paths=image_paths, model=model, preprocess=preprocess)
+        print(f"[DEBUG] Nb d'images passées : {len(image_paths)}")
+        print(f"[DEBUG] Nb d'embeddings extraits : {len(all_embeddings)}")
+
+        if len(all_embeddings) != len(image_paths):
+            print("[ERREUR] Extraction des features image incomplète !")
+
+
+
+        nan_rows = [i for i, emb in enumerate(all_embeddings) if np.isnan(emb).any()]
+        if nan_rows:
+            print(f"[ALERTE] {len(nan_rows)} embeddings image contiennent des NaN !")
         columns = [f"image_feat_{j}" for j in range(len(all_embeddings[0]))]
         features_pl = pl.DataFrame(all_embeddings, schema=columns)
 

@@ -15,9 +15,10 @@ from src.models.utils import get_f1_score_from_model_uri
 from pymongo import MongoClient
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_client import Summary, Gauge, Counter
-
-
+import os
 import traceback
+from pathlib import Path
+import numpy as np
 # Configuration
 SECRET_KEY = "rakuten_secret_key"  
 ALGORITHM = "HS256"
@@ -73,6 +74,15 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         return users_db[username]
     except JWTError:
         raise credentials_exception
+#fonction de conversion types numpy vers types natifs Python
+def convert_types(doc):
+    return {
+        k: (
+            v.item() if isinstance(v, (np.generic, np.ndarray)) else v
+        )
+        for k, v in doc.items()
+    }
+
 
 # ==== APP ====
 app = FastAPI()
@@ -104,18 +114,22 @@ def get_champion_model():
         all_models = client.search_registered_models()
 
         for model_info in all_models:
-            for v in model_info.latest_versions:
-                if "champion" in v.aliases:
+            try:
+                version_info = client.get_model_version_by_alias(model_info.name, "champion")
+                if version_info:  
                     model_uri = f"models:/{model_info.name}@champion"
                     loaded_model = mlflow.pyfunc.load_model(model_uri)
-                    print(f"Modèle chargé depuis {model_uri}")
-                    return loaded_model, model_info.name, v.version
+                    print(f"Modèle champion trouvé : {model_info.name} (version: {version_info.version})")
+                    return loaded_model, model_info.name, version_info.version
+            except Exception:
+                continue  
 
-        raise ValueError("Aucun modèle avec l'alias 'champion' trouvé (pas de modèle en prod)")
-    
+        raise ValueError("Aucun modèle avec l'alias 'champion' trouvé.")
+
     except Exception as e:
-        print(f"Erreur chargement modèle champion : {e}")
+        print(f"Erreur lors du chargement du modèle champion : {e}")
         return None, None, None
+
 
 # Class pour le schéma
 class PredictRequest_ids(BaseModel):
@@ -132,51 +146,57 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     nb_of_requests_counter.labels(method='POST', endpoint='/login').inc()
     return {"access_token": access_token, "token_type": "bearer"}
 
-model, model_name_loaded, model_version = get_champion_model()
+
 @app.post("/predict")
 def predict(request_ids: PredictRequest_ids, user: dict = Depends(get_current_user)):
-    global model
-    try:
-        if model is None:
-            raise ValueError("Modèle champion non chargé.")
-        #Récupération des porduct_id présent dans la base à scorer
-        docs_in_db = list(db["X_to_predict"].find({}, {"_id": 0, "productid": 1, "imageid": 1, "designation": 1}))
-        df_in_db = pd.DataFrame(docs_in_db)
-        request_ids_set = set(request_ids.productid)
-        filtered_df = df_in_db[df_in_db["productid"].isin(request_ids_set)]
-        filtered_ids_list = filtered_df["productid"].tolist()
+    model, model_name_loaded, model_version = get_champion_model()
+    IMAGE_FOLDER = "/app/data/raw_data_test/images_test"
 
-        # Liste des productid exclus
-        excluded_productids = list(request_ids_set - set(filtered_ids_list))
+    if model is None:
+        raise ValueError("Modèle champion non chargé.")
+    #Récupération des porduct_id présent dans la base à scorer
+    docs_in_db = list(db["X_to_predict"].find({}, {"_id": 0, "productid": 1, "imageid": 1, "designation": 1}))
+    df_in_db = pd.DataFrame(docs_in_db)
+    request_ids_set = set(request_ids.productid)
+    filtered_df = df_in_db[df_in_db["productid"].isin(request_ids_set)]
+    filtered_ids_list = filtered_df["productid"].tolist()
 
-        # Message si certains IDs sont manquants
-        if excluded_productids:
-            print(f"{len(excluded_productids)} productid sur {len(request_ids_set)} ne se trouvent pas dans la base X_to_predict")
+    # Liste des productid exclus
+    excluded_productids = list(request_ids_set - set(filtered_ids_list))
 
-        with inference_time_summary.time():
-            #Pré-processing
-            build_images_features_func_from_mongo(for_predicting=True, list_id=filtered_ids_list, source="raw_data_for_prediction", IMAGE_FOLDER="data/raw_data_test/images_test")
-            build_text_features_func_from_mongo(for_predicting=True, list_id=filtered_ids_list, source="raw_data_for_prediction")
-        
-            # Texte
-            print("Filtrage des features texte...")
-            text_docs = db["text_features_to_predict"].find({"productid": {"$in": filtered_ids_list}}, {"_id": 0})
-            text_df = pd.DataFrame(list(text_docs))
+    # Message si certains IDs sont manquants
+    if excluded_productids:
+        print(f"{len(excluded_productids)} productid sur {len(request_ids_set)} ne se trouvent pas dans la base X_to_predict")
+    
+    with inference_time_summary.time():
+        #Pré-processing
+        build_images_features_func_from_mongo(for_predicting=True, list_id=filtered_ids_list, source="X_to_predict", IMAGE_FOLDER=IMAGE_FOLDER)
+        build_text_features_func_from_mongo(for_predicting=True, list_id=filtered_ids_list, source="X_to_predict")
+    
+        # Texte
+        print("Filtrage des features texte...")
+        text_docs = db["text_features_to_predict"].find({"productid": {"$in": filtered_ids_list}}, {"_id": 0})
+        text_df = pd.DataFrame(list(text_docs))
 
-            # Images
-            print("Filtrage des features image...")
-            image_docs = db["image_features_to_predict"].find({"productid": {"$in": filtered_ids_list}}, {"_id": 0})
-            image_df = pd.DataFrame(list(image_docs))
+        # Images
+        print("Filtrage des features image...")
+        image_docs = db["image_features_to_predict"].find({"productid": {"$in": filtered_ids_list}}, {"_id": 0})
+        image_df = pd.DataFrame(list(image_docs))
 
-            if text_df.empty or image_df.empty:
-                raise HTTPException(status_code=400, detail="Données incomplètes pour certaines images ou textes.")
+        if text_df.empty or image_df.empty:
+            raise HTTPException(status_code=400, detail="Données incomplètes pour certaines images ou textes.")
 
-            #Construction du data input pour prédiction
-            joined_df = text_df.merge(image_df, on="productid", how="inner")
-        
-            #Prédiction
+        #Construction du data input pour prédiction
+        joined_df = text_df.merge(image_df, on="productid", how="inner")
+        print("Nombre de ligne dans joind_df : ",len(joined_df))
+        #Prédiction
+        print("Modèle chargé, prêt à prédire")
+        try:
             preds = model.predict(joined_df)
-        
+        except Exception as e:
+            print(f"[ERROR] Erreur pendant la prédiction : {e}")
+            raise
+        print("Prédiction terminée")
         #Enregistrement des prédictions dans la base MongoDB
         now = datetime.now().isoformat()
         model_name_version = f"{model_name_loaded}_{model_version}"
@@ -195,18 +215,17 @@ def predict(request_ids: PredictRequest_ids, user: dict = Depends(get_current_us
             }
             prediction_records.append(record)
 
-            if prediction_records:
-                db["Prediction"].insert_many(prediction_records)
-            nb_of_requests_counter.labels(method='POST', endpoint='/predict').inc()
+        if prediction_records:
+            prediction_records = [convert_types(rec) for rec in prediction_records]
+            db["Prediction"].insert_many(prediction_records)
+        nb_of_requests_counter.labels(method='POST', endpoint='/predict').inc()
         return {
             "message": f"{len(prediction_records)} prédictions faites sur {len(filtered_ids_list)} produits.",
             "nb_exclus": len(excluded_productids),
             "model": model_name_version,
             "timestamp": now
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur pendant la prédiction : {str(e)}")
-
+    
 class PreprocessRequest(BaseModel):
     batch_id: int
 
@@ -226,14 +245,13 @@ def preprocess_data(request: PreprocessRequest, user: dict = Depends(get_current
 
 @app.post("/training")
 def retrain(user: dict = Depends(get_current_user)):
-    global model
     try:
         with training_time_summary.time():
             # Réentraînement du modèle
             subprocess.run(["python", "-m", "src.models.experiment"], check=True)
             # Sélection + Promotion + récupération du modèle champion
             model_uri = select_and_promote_best_model(list_models_name=["pca_lgbm_pipeline"])
-            model = mlflow.pyfunc.load_model(model_uri)
+            #model = mlflow.pyfunc.load_model(model_uri)
         # Récupération de la version depuis l'alias "champion"
         client = MlflowClient()
         model_name = model_uri.split("models:/")[1].split("@")[0]

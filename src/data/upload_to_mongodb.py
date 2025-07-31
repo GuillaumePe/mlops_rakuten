@@ -8,18 +8,37 @@ client = MongoClient("mongodb://mongodb:27017")
 db = client["MAR25_CMLOPS_RAKUTEN"]
 
 def insert_file_to_collection(file_path, collection_name):
-    if file_path.endswith(".csv"):
+    if collection_name == "X_to_predict":
         df = pl.read_csv(file_path)
-    elif file_path.endswith(".parquet"):
-        df = pl.read_parquet(file_path)
+
+        # Extraire les productid des fichiers images disponibles
+        image_dir = "data/raw_data_test/images_test"
+        image_filenames = os.listdir(image_dir)
+        available_productids = {
+            filename.split("_product_")[1].split(".")[0]
+            for filename in image_filenames
+            if "_product_" in filename
+        }
+
+        # Filtrer les lignes du CSV selon les productid présents dans les images
+        df = df.filter(pl.col("productid").cast(pl.Utf8).is_in(available_productids))
+
     else:
-        raise ValueError("Format de fichier non supporté : doit être .csv ou .parquet")
-    
+        if file_path.endswith(".csv"):
+            df = pl.read_csv(file_path)
+        elif file_path.endswith(".parquet"):
+            df = pl.read_parquet(file_path)
+        else:
+            raise ValueError("Format de fichier non supporté : doit être .csv ou .parquet")
+
+    # Ajouter une clé si nécessaire
     if collection_name in {"text_features", "image_features"}:
         if "imageid" in df.columns and "productid" in df.columns:
             df = df.with_columns(
                 (pl.col("imageid").cast(pl.Utf8) + "_" + pl.col("productid").cast(pl.Utf8)).alias("key")
             )
+
+    # Insertion dans MongoDB
     records = df.to_dicts()
     db[collection_name].insert_many(records)
     print(f"{len(records)} inserted in {collection_name}")

@@ -111,7 +111,7 @@
           },
           "targets": [
             {
-              "expr": "count(container_last_seen{image!=\"\"})",
+              "expr": "count(container_last_seen)",
               "intervalFactor": 2,
               "legendFormat": "",
               "metric": "container_last_seen",
@@ -192,7 +192,7 @@
           },
           "targets": [
             {
-              "expr": "sum(container_memory_usage_bytes{image!=\"\"})/1024/1024",
+              "expr": "sum(container_memory_usage_bytes)/1024/1024",
               "intervalFactor": 2,
               "legendFormat": "",
               "metric": "container_memory_usage_bytes",
@@ -273,7 +273,7 @@
           },
           "targets": [
             {
-              "expr": "sum(rate(container_cpu_user_seconds_total{image!=\"\"}[5m]) * 100)",
+              "expr": "sum(rate(container_cpu_user_seconds_total[5m]) * 100)",
               "intervalFactor": 2,
               "legendFormat": "",
               "metric": "container_memory_usage_bytes",
@@ -344,7 +344,7 @@
           "steppedLine": false,
           "targets": [
             {
-              "expr": "rate(container_cpu_user_seconds_total{image!=\"\"}[5m]) * 100",
+              "expr": "rate(container_cpu_user_seconds_total[5m]) * 100",
               "intervalFactor": 2,
               "legendFormat": "{{name}}",
               "metric": "cpu",
@@ -434,7 +434,7 @@
           "steppedLine": false,
           "targets": [
             {
-              "expr": "container_memory_usage_bytes{image!=\"\"}",
+              "expr": "container_memory_usage_bytes",
               "hide": false,
               "intervalFactor": 2,
               "legendFormat": "{{name}}",
@@ -522,7 +522,7 @@
           "steppedLine": false,
           "targets": [
             {
-              "expr": "irate(container_network_receive_bytes_total{image!=\"\"}[5m])",
+              "expr": "irate(container_network_receive_bytes_total[5m])",
               "intervalFactor": 2,
               "legendFormat": "{{name}}",
               "metric": "container_network_receive_bytes_total",
@@ -600,7 +600,7 @@
           "steppedLine": false,
           "targets": [
             {
-              "expr": "irate(container_network_transmit_bytes_total{image!=\"\"}[5m])",
+              "expr": "irate(container_network_transmit_bytes_total[5m])",
               "intervalFactor": 2,
               "legendFormat": "{{name}}",
               "refId": "A",

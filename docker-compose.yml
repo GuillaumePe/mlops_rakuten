@@ -111,6 +111,7 @@ services:
       timeout: 5s
       retries: 20
       start_period: 20s
+
   mongo_initializer:
     build:
       context: .
@@ -255,6 +256,7 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
+      - ./data/raw_data_test/images_test:/app/data/raw_data_test/images_test
       - ./.git:/app/.git
       - ./mlruns:/mlflow/mlruns
     environment:
@@ -309,12 +311,14 @@ services:
     image: gcr.io/cadvisor/cadvisor:latest
     container_name: cadvisor
     ports:
-      - "8085:8085"
+      - "8085:8080"  
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
+    command:
+      - "--port=8085"
     depends_on:
       - api
     networks:

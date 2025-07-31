@@ -273,11 +273,6 @@ def compare_best_models(model_names: list, X_test, y_test, metric=lambda y_true,
     return {"best_model":best_model, "best_version":best_version}
 
 
-
-
-
-
-
 #Fonction permettant de promouvoir le meilleur modèle en production
 
 def promotion_exclusive_best_model_to_production(model_name, model_version):
