@@ -76,7 +76,7 @@
 
 <br />
 <div align="center">
-  <img src="images/datascientest.png" alt="Logo" width="80" height="80">
+  <img src="images/datascientest.png" alt="Logo" width="720" height="720">
   </a>
 
 This repo contains the work that has been done for my Datascientest MLOps training camp final project. It relies on the challenge data : https://challengedata.ens.fr/challenges/35. 
@@ -107,7 +107,10 @@ Additionally, it's important to note that the target classes in the training dat
 
 ### APP global architecture 
 
-[![APP Architecture Screen Shot]][app-architecture-screenshot]
+<br />
+<div align="center">
+  <img src="images/architecture_app_rakuten.png" alt="app-global-architecture" width="720" height="720">
+  </a>
 <!-- GETTING STARTED -->
 ## Getting Started
 
