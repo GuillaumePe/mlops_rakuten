@@ -19,9 +19,6 @@
 *** https://www.markdownguide.org/basic-syntax/#reference-style-links
 -->
 [![Contributors][contributors-shield]][contributors-url]
-[![Forks][forks-shield]][forks-url]
-[![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
 [![project_license][license-shield]][license-url]
 [![LinkedIn][linkedin-shield]][linkedin-url]
 
@@ -58,7 +55,7 @@
       </ul>
     </li>
     <li>
-      <a href="#getting-started">getting-started</a>
+      <a href="#getting-started">Getting Started</a>
       <ul>
         <li><a href="#prerequisites">prerequisites</a></li>
         <li><a href="#installation">installation</a></li>
@@ -77,7 +74,10 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-[![Product Name Screen Shot]][product-screenshot]
+<br />
+<div align="center">
+  <img src="images/datascientest.png" alt="Logo" width="80" height="80">
+  </a>
 
 This repo contains the work that has been done for my Datascientest MLOps training camp final project. It relies on the challenge data : https://challengedata.ens.fr/challenges/35. 
 The challenge consists of a multimodal classification task on a large product catalog from the Rakuten marketplace.
