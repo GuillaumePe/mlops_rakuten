@@ -181,7 +181,7 @@ To run this project, you need to have the following tools installed:
 
 
 ### Project Organization
-```sh
+```text
 ├── LICENSE
 ├── README.md                  <- Main README for the project.
 ├── docker-compose.yml         <- Docker Compose file to orchestrate all services.
