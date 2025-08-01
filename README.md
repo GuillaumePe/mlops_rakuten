@@ -136,28 +136,32 @@ These instructions will help you set up the project in a local environment using
 ## Prerequisites
 
 To run this project, you need to have the following tools installed:
-- **Git**  
+
+GIT:  
   Install Git from https://git-scm.com
   Or via terminal:
   ```sh
   sudo apt-get install git  
   ```
-- **Docker & Docker-compose** 
+
+Docker & Docker-compose 
   Install Docker from https://www.docker.com/get-started
  
 
 ## Installation
 
-1. Clone the repo
+Clone the repo
    ```sh
    git clone https://github.com/DataScientest-Studio/mar25_cmlops_rakuten/tree/dev_GP.git
    ```
-2. Access to the project folder and launch docker
+
+Access to the project folder and launch docker
    ```sh
    cd mar25_cmlops_rakuten
    docker-compose up --build
    ```
-   This will:
+
+This will:
 
     - Build and start all services defined in docker-compose.yml
 
@@ -165,7 +169,7 @@ To run this project, you need to have the following tools installed:
 
     - Launch Airflow, MLflow, PostgreSQL, MongoDB, Prometheus, Grafana, etc.
 
-3.  Access the services via browser
+Access the services via browser
 
   | Service              | Port local               | URL                                                    |
   |----------------------|--------------------------|--------------------------------------------------------|
