@@ -181,48 +181,11 @@ To run this project, you need to have the following tools installed:
 
 
 ### Project Organization
-```text
-├── LICENSE
-├── README.md                  <- Main README for the project.
-├── docker-compose.yml         <- Docker Compose file to orchestrate all services.
-├── setup.sh / wait-for-it.sh  <- Startup and service readiness scripts.
-├── .env                       <- Environment variables used by Docker and the application.
-├── requirements.txt           <- Python dependencies list for the venv which was used for the dev.
-│
-├── data/                      <- Dataset folders (used by pipeline and API).
-│   ├── explored_data/         <- Data used in exploratory analysis.
-│   ├── preprocessed/          <- Cleaned and feature-engineered data.
-│   ├── raw_data/              <- Original training data and batch files.
-│   │   └── batches_for_prediction/
-│   ├── raw_data_test/         <- Inference test data + test images.
-│
-├── docker/                    <- Docker configurations for each component.
-│   ├── airflow/               <- Airflow setup (dags, logs, init, plugins).
-│   ├── api/                   <- API Dockerfile and requirements.
-│   ├── mlflow/                <- MLflow server Dockerfile.
-│   ├── mongo_initializer/     <- Container to load MongoDB with initial data.
-│   ├── postgres-init/         <- SQL script to init PostgreSQL.
-│
-├── grafana/                   <- Grafana provisioning setup.
-│   └── provisioning/
-│       ├── dashboards/        <- Predefined dashboards (JSON).
-│       └── datasources/       <- Default datasource config.
-│
-├── images/                    <- Project or README-related images (e.g. architecture diagram).
-├── mlruns/                    <- MLflow artifact storage (runs, models, metrics).
-├── notebooks/                 <- Jupyter notebooks (EDA, training experiments, etc).
-│
-├── prometheus/                <- Prometheus configuration files.
-│   └── prometheus.yml         <- Metric scraping rules.
-│
-├── src/                       <- Source code for the ML pipeline and API.
-│   ├── airflow/dags/          <- Airflow DAGs for pipeline orchestration.
-│   ├── api/                   <- FastAPI code for model inference.
-│   │   └── main.py            <- Entry point of the API.
-│   ├── data/                  <- Dataset handling and ingestion utilities.
-│   ├── features/              <- Feature engineering scripts.
-│   ├── models/                <- Model training and evaluation logic.
-```
+
+<br />
+<div align="center">
+  <img src="images/rakuten_project_organization.jpg" alt="app-global-architecture" width="720" height="720">
+  </a>
 
 
 ### Usage
