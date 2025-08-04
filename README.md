@@ -152,12 +152,17 @@ Docker & Docker-compose
 
 Clone the repo
    ```sh
-   git clone https://github.com/DataScientest-Studio/mar25_cmlops_rakuten/tree/dev_GP.git
+   git clone -b dev_GP https://github.com/DataScientest-Studio/mar25_cmlops_rakuten.git
    ```
 
-Access to the project folder and launch docker
+Access to the project folder, download preprocessed and raw data
    ```sh
    cd mar25_cmlops_rakuten
+   pip install dagshub
+   python download_data.py
+   ```
+Launch docker
+   ```sh
    docker-compose up --build
    ```
 
