@@ -1,1 +1,4 @@
-/raw_data
+/raw_data_test
+/raw_data/X_train.csv
+/raw_data/Y_train.csv
+

@@ -158,11 +158,23 @@ Clone the repo
 Access to the project folder, download preprocessed and raw data
    ```sh
    cd mar25_cmlops_rakuten
-   pip install dagshub
-   python download_data.py
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install --upgrade pip
+   pip install 'dvc[s3]' dvc dagshub
+  
+  dvc remote modify origin --local access_key_id <token> 
+  dvc remote modify origin --local secret_access_key <token>
+  
+  dvc pull data/preprocessed/chunked_image_files.dvc
+  dvc pull data/preprocessed/chunked_text_files.dvc 
+  dvc pull data/raw_data/batches.dvc 
+
+  dvc get https://GuillaumePe:<TOKEN>@dagshub.com/GuillaumePe/mar25_cmlops_rakuten data/preprocessed/chunked_image_files
    ```
 Launch docker
    ```sh
+   docker volume create --name=mar25_cmlops_rakuten_mongo_data
    docker-compose up --build
    ```
 
