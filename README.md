@@ -232,13 +232,18 @@ Then go to the airflow UI and Login. You can switch on the Training Dag and afte
 When you arrive to the Airflow UI :
 <br />
 <div align="center">
-  <img src="mar25_cmlops_rakuten/images/dag_ariflow_rakuten.jpg" alt="Usage" width="720" height="720">
+  <img src="images/dag_ariflow_rakuten.jpg" alt="Usage" width="720" height="720">
   </a>
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+what the DAGs must looks like after they been switched on :
+<br />
+<div align="center">
+  <img src="images/dag_active_airflow_rakuten.jpg" alt="Usage" width="720" height="720">
+  </a>
 
 If your ressources are enough you can tweak the hyperparameter search space (hyperparameters) and the n_trials_bayesian_search in src/models/experiment.py to have better preformances with the model.
 
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
 <!-- LICENSE -->
 ### License
 
