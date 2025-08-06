@@ -58,9 +58,6 @@
     </li>
     <li><a href="#project_organization">Project Organization</a></li>
     <li><a href="#usage">Usage</a></li>
-    
-    <li><a href="#license">License</a></li>
-    <li><a href="#contact">guillaumepedron@hotmail.com</a></li>
   </ol>
 </details>
 
