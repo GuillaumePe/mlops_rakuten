@@ -219,18 +219,25 @@ if localhost doesn't work try with your IP adress
 
 <br />
 <div align="center">
-  <img src="images/rakuten_project_organization.jpg" alt="app-global-architecture" width="720" height="720">
+  <img src="images/rakuten_project_organization.jpg" alt="project_organization" width="720" height="720">
   </a>
 
 
 ### Usage
 
-Use this space to show useful examples of how a project can be used. Additional screenshots, code examples and demos work well in this space. You may also link to more resources.
+Wait 5 to 10 minutes that all services are up and healthy (check with command : docker ps), except for cadvisor (the health check is ko)
 
-_For more examples, please refer to the [Documentation](https://example.com)_
+Then go to the airflow UI and Login. You can switch on the Training Dag and after a couple of minutes switch On the Predict Dag
+
+When you arrive to the Airflow UI :
+<br />
+<div align="center">
+  <img src="mar25_cmlops_rakuten/images/dag_ariflow_rakuten.jpg" alt="Usage" width="720" height="720">
+  </a>
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
+If your ressources are enough you can tweak the hyperparameter search space (hyperparameters) and the n_trials_bayesian_search in src/models/experiment.py to have better preformances with the model.
 
 <!-- LICENSE -->
 ### License
@@ -238,29 +245,6 @@ _For more examples, please refer to the [Documentation](https://example.com)_
 Distributed under the project_license. See `LICENSE.txt` for more information.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
-
-<!-- CONTACT -->
-### Contact
-
-Your Name - [@twitter_handle](https://twitter.com/twitter_handle) - email@email_client.com
-
-Project Link: [https://github.com/github_username/repo_name](https://github.com/github_username/repo_name)
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
-
-<!-- ACKNOWLEDGMENTS -->
-### Acknowledgments
-
-* []()
-* []()
-* []()
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
 
 
 <!-- MARKDOWN LINKS & IMAGES -->
