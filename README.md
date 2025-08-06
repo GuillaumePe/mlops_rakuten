@@ -151,17 +151,19 @@ Docker & Docker-compose
 ## Installation
 
 Clone the repo
-   ```sh
-   git clone -b dev_GP https://github.com/DataScientest-Studio/mar25_cmlops_rakuten.git
-   ```
+  ```sh
+  git clone -b dev_GP https://github.com/DataScientest-Studio/mar25_cmlops_rakuten.git
+  ```
 
 Access to the project folder, download preprocessed and raw data
-   ```sh
-   cd mar25_cmlops_rakuten
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install --upgrade pip
-   pip install 'dvc[s3]' dvc dagshub
+  ```sh
+  cd mar25_cmlops_rakuten
+  
+  python3 -m venv .venv
+  source .venv/bin/activate
+  
+  pip install --upgrade pip
+  pip install 'dvc[s3]' dvc dagshub
   
   dvc remote modify origin --local access_key_id <token> 
   dvc remote modify origin --local secret_access_key <token>
@@ -169,22 +171,34 @@ Access to the project folder, download preprocessed and raw data
   dvc pull data/preprocessed/chunked_image_files.dvc
   dvc pull data/preprocessed/chunked_text_files.dvc 
   dvc pull data/raw_data/batches.dvc 
+  ```
+If the download of the train raw data batches doesn't work with dvc you can download all the raw data here : https://challengedata.ens.fr/challenges/35. Same for raw data test and images.
+For the raw_data_training (optional):
+  ```sh
+  mkdir data/raw_data/images/image_train
+  ```
+Put the images downloaded for the training in this folder and the training csvs in data/raw_data
 
-  dvc get https://GuillaumePe:<TOKEN>@dagshub.com/GuillaumePe/mar25_cmlops_rakuten data/preprocessed/chunked_image_files
-   ```
-Launch docker
-   ```sh
-   docker volume create --name=mar25_cmlops_rakuten_mongo_data
-   docker-compose up --build
-   ```
+For the raw_data_test (not optional):
+  ```sh
+  mkdir data/raw_data_test
+  mkdir data/raw_data_test/images_test
+  ```
+Put the images downloaded for the test in data/raw_data_test/images_test and the test csvs in data/raw_data_test
+
+Then Launch docker
+  ```sh
+  docker volume create --name=mar25_cmlops_rakuten_mongo_data
+  docker-compose up --build
+  ```
 
 This will:
 
-    - Build and start all services defined in docker-compose.yml
+  - Build and start all services defined in docker-compose.yml
 
-    - Install dependencies for training and inference
+  - Install dependencies for training and inference
 
-    - Launch Airflow, MLflow, PostgreSQL, MongoDB, Prometheus, Grafana, etc.
+  - Launch Airflow, MLflow, PostgreSQL, MongoDB, Prometheus, Grafana, etc.
 
 Access the services via browser
 
@@ -196,7 +210,7 @@ Access the services via browser
   | Grafana              | `3000`                   | [http://localhost:3000](http://localhost:3000)         |
   | FastAPI              | `8000`                   | [http://localhost:8000](http://localhost:8000)         |
 
-
+if localhost doesn't work try with your IP adress
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 
