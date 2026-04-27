@@ -19,6 +19,10 @@ import os
 import traceback
 from pathlib import Path
 import numpy as np
+import requests 
+from requests.auth import HTTPBasicAuth
+
+
 # Configuration
 SECRET_KEY = "rakuten_secret_key"  
 ALGORITHM = "HS256"
@@ -28,6 +32,9 @@ repo_name = 'mar25_cmlops_rakuten'
 db_client = MongoClient("mongodb://mongodb:27017")
 db = db_client["MAR25_CMLOPS_RAKUTEN"]
 Mlflow_tracking_uri = "http://mlflow:5000"
+IMAGE_FOLDER_TRAIN = "data/raw_data/images/image_train"
+IMAGE_FOLDER_TEST = "data/raw_data_test/images/image_test"
+
 
 #User DB
 users_db = {
@@ -36,6 +43,33 @@ users_db = {
         "password": "123admin"  
     }
 }
+
+
+
+
+def get_airflow_variable(key: str, default):
+    """
+    Lit une Variable Airflow via son API REST.
+    
+    NOTE: en prod, on utiliserait plutôt un secret manager partagé (Vault, AWS SSM)
+    plutôt que de coupler l'API au webserver Airflow. 
+    """
+    try:
+        r = requests.get(
+            f"http://airflow-webserver:8080/api/v1/variables/{key}",
+            auth=HTTPBasicAuth(
+                os.getenv("AIRFLOW_API_USER"),
+                os.getenv("AIRFLOW_API_PASSWORD"),
+            ),
+            timeout=5,
+        )
+        if r.status_code == 200:
+            return int(r.json()["value"])
+    except Exception as e:
+        # On loggue mais on retombe sur le défaut : un seuil mal lu ne doit
+        # pas bloquer l'inférence, juste utiliser une valeur de secours.
+        print(f"[WARN] Airflow variable fetch failed: {e}")
+    return default
 
 #Définition des auth models
 class Token(BaseModel):
@@ -87,6 +121,8 @@ def convert_types(doc):
     return out
 
 
+
+
 # ==== APP ====
 app = FastAPI()
 mlflow.set_tracking_uri(Mlflow_tracking_uri)
@@ -102,14 +138,6 @@ nb_of_requests_counter = Counter(name='Nb_requetes',
                                  labelnames=['method', 'endpoint'])
 model_version_gauge = Gauge("model_version", "Version du modèle champion")
 
-
-@app.get("/health")
-def read_root():
-    nb_of_requests_counter.labels(method='GET', endpoint='/health').inc()
-    return {"message": "API modèle ML Rakuten online"}
-
-# Initialisation Dagshub
-#dagshub.init(repo_owner=repo_owner, repo_name=repo_name, mlflow=True)
 
 def get_champion_model():
     try:
@@ -133,12 +161,116 @@ def get_champion_model():
         print(f"Erreur lors du chargement du modèle champion : {e}")
         return None, None, None
 
+#Fonction qui score une liste de productids
+def score_productids(productids: list) -> dict:
+    """
+    Logique commune de scoring d'une liste de productid.
+    Factorise le code partagé entre /predict, /predict_pending et /rescore_all.
+
+    NOTE Phase 0 — Couplée à la signature M2 (text+image features extraits via
+    Mongo, merge pandas, LightGBM sur joint embeddings). À généraliser en
+    Phase 1 lors de l'introduction de M3.
+    """
+    model, model_name_loaded, model_version = get_champion_model()
+
+    if model is None:
+        raise ValueError("Modèle champion non chargé.")
+
+    # Récupération des productid présents dans la base à scorer
+    docs_in_db = list(db["X_to_predict"].find(
+        {}, {"_id": 0, "productid": 1, "imageid": 1, "designation": 1}
+    ))
+    df_in_db = pd.DataFrame(docs_in_db)
+    request_ids_set = set(productids)
+    filtered_df = df_in_db[df_in_db["productid"].isin(request_ids_set)]
+    filtered_ids_list = filtered_df["productid"].tolist()
+
+    # Liste des productid exclus
+    excluded_productids = list(request_ids_set - set(filtered_ids_list))
+    if excluded_productids:
+        print(f"{len(excluded_productids)} productid sur {len(request_ids_set)} ne se trouvent pas dans la base X_to_predict")
+
+    with inference_time_summary.time():
+        # Pré-processing
+        build_images_features_func_from_mongo(
+            for_predicting=True, list_id=filtered_ids_list,
+            source="X_to_predict", IMAGE_FOLDER=IMAGE_FOLDER_TEST
+        )
+        build_text_features_func_from_mongo(
+            for_predicting=True, list_id=filtered_ids_list, source="X_to_predict"
+        )
+
+        # Texte
+        print("Filtrage des features texte...")
+        text_docs = db["text_features_to_predict"].find(
+            {"productid": {"$in": filtered_ids_list}}, {"_id": 0}
+        )
+        text_df = pd.DataFrame(list(text_docs))
+
+        # Images
+        print("Filtrage des features image...")
+        image_docs = db["image_features_to_predict"].find(
+            {"productid": {"$in": filtered_ids_list}}, {"_id": 0}
+        )
+        image_df = pd.DataFrame(list(image_docs))
+
+        if text_df.empty or image_df.empty:
+            raise HTTPException(
+                status_code=400,
+                detail="Données incomplètes pour certaines images ou textes."
+            )
+
+        # Construction du data input pour prédiction
+        joined_df = text_df.merge(image_df, on="productid", how="inner")
+        print("Nombre de ligne dans joind_df : ", len(joined_df))
+
+        # Prédiction
+        print("Modèle chargé, prêt à prédire")
+        try:
+            preds = model.predict(joined_df)
+        except Exception as e:
+            print(f"[ERROR] Erreur pendant la prédiction : {e}")
+            raise
+        print("Prédiction terminée")
+
+        # Enregistrement des prédictions dans la base MongoDB
+        now = datetime.now().isoformat()
+        model_name_version = f"{model_name_loaded}_{model_version}"
+        prediction_records = []
+
+        for productid, pred in zip(joined_df["productid"], preds):
+            match_row = filtered_df[filtered_df["productid"] == productid]
+            if not match_row.empty:
+                record = {
+                    "productid": productid,
+                    "designation": match_row.iloc[0]["designation"],
+                    "imageid": match_row.iloc[0]["imageid"],
+                    "prediction": int(pred),
+                    "date_pred": now,
+                    "model": model_name_version,
+                }
+                prediction_records.append(record)
+
+        if prediction_records:
+            prediction_records = [convert_types(rec) for rec in prediction_records]
+            db["Prediction"].insert_many(prediction_records)
+
+        return {
+            "message": f"{len(prediction_records)} prédictions faites sur {len(filtered_ids_list)} produits.",
+            "nb_exclus": len(excluded_productids),
+            "model": model_name_version,
+            "timestamp": now,
+        }
 
 # Class pour le schéma
 class PredictRequest_ids(BaseModel):
     productid: list[int]
 
 # création des endpoints
+@app.get("/health")
+def read_root():
+    nb_of_requests_counter.labels(method='GET', endpoint='/health').inc()
+    return {"message": "API modèle ML Rakuten online"}
 
 @app.post("/login", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
@@ -152,82 +284,56 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 @app.post("/predict")
 def predict(request_ids: PredictRequest_ids, user: dict = Depends(get_current_user)):
-    model, model_name_loaded, model_version = get_champion_model()
-    IMAGE_FOLDER = "/app/data/raw_data_test/images_test"
+    nb_of_requests_counter.labels(method='POST', endpoint='/predict').inc()
+    return score_productids(request_ids.productid)
 
-    if model is None:
-        raise ValueError("Modèle champion non chargé.")
-    #Récupération des porduct_id présent dans la base à scorer
-    docs_in_db = list(db["X_to_predict"].find({}, {"_id": 0, "productid": 1, "imageid": 1, "designation": 1}))
-    df_in_db = pd.DataFrame(docs_in_db)
-    request_ids_set = set(request_ids.productid)
-    filtered_df = df_in_db[df_in_db["productid"].isin(request_ids_set)]
-    filtered_ids_list = filtered_df["productid"].tolist()
 
-    # Liste des productid exclus
-    excluded_productids = list(request_ids_set - set(filtered_ids_list))
+@app.post("/predict_pending")
+def predict_pending(user: dict = Depends(get_current_user)):
+    """
+    Vérifie si la queue X_to_predict atteint le seuil. Si oui, score tous les
+    samples en attente et les retire de la queue. Sinon, no-op.
 
-    # Message si certains IDs sont manquants
-    if excluded_productids:
-        print(f"{len(excluded_productids)} productid sur {len(request_ids_set)} ne se trouvent pas dans la base X_to_predict")
-    
-    with inference_time_summary.time():
-        #Pré-processing
-        build_images_features_func_from_mongo(for_predicting=True, list_id=filtered_ids_list, source="X_to_predict", IMAGE_FOLDER=IMAGE_FOLDER)
-        build_text_features_func_from_mongo(for_predicting=True, list_id=filtered_ids_list, source="X_to_predict")
-    
-        # Texte
-        print("Filtrage des features texte...")
-        text_docs = db["text_features_to_predict"].find({"productid": {"$in": filtered_ids_list}}, {"_id": 0})
-        text_df = pd.DataFrame(list(text_docs))
+    Le seuil est lu via l'API Airflow (Variable `predict_queue_threshold`).
+    On capture les productid au début et on supprime UNIQUEMENT ces IDs à la fin :
+    cela évite d'effacer les samples injectés par SimulateDataArrival pendant le scoring.
+    """
+    nb_of_requests_counter.labels(method='POST', endpoint='/predict_pending').inc()
 
-        # Images
-        print("Filtrage des features image...")
-        image_docs = db["image_features_to_predict"].find({"productid": {"$in": filtered_ids_list}}, {"_id": 0})
-        image_df = pd.DataFrame(list(image_docs))
+    threshold = get_airflow_variable("predict_queue_threshold", default=50)
+    queue_size = db["X_to_predict"].count_documents({})
 
-        if text_df.empty or image_df.empty:
-            raise HTTPException(status_code=400, detail="Données incomplètes pour certaines images ou textes.")
-
-        #Construction du data input pour prédiction
-        joined_df = text_df.merge(image_df, on="productid", how="inner")
-        print("Nombre de ligne dans joind_df : ",len(joined_df))
-        #Prédiction
-        print("Modèle chargé, prêt à prédire")
-        try:
-            preds = model.predict(joined_df)
-        except Exception as e:
-            print(f"[ERROR] Erreur pendant la prédiction : {e}")
-            raise
-        print("Prédiction terminée")
-        #Enregistrement des prédictions dans la base MongoDB
-        now = datetime.now().isoformat()
-        model_name_version = f"{model_name_loaded}_{model_version}"
-        prediction_records = []
-        
-        for productid, pred in zip(joined_df["productid"], preds):
-            match_row = filtered_df[filtered_df["productid"] == productid]
-            if not match_row.empty:
-                record = {
-                "productid": productid,
-                "designation": match_row.iloc[0]["designation"],
-                "imageid": match_row.iloc[0]["imageid"],
-                "prediction": int(pred),
-                "date_pred": now,
-                "model": model_name_version,
-            }
-            prediction_records.append(record)
-
-        if prediction_records:
-            prediction_records = [convert_types(rec) for rec in prediction_records]
-            db["Prediction"].insert_many(prediction_records)
-        nb_of_requests_counter.labels(method='POST', endpoint='/predict').inc()
+    if queue_size < threshold:
         return {
-            "message": f"{len(prediction_records)} prédictions faites sur {len(filtered_ids_list)} produits.",
-            "nb_exclus": len(excluded_productids),
-            "model": model_name_version,
-            "timestamp": now
+            "message": f"Queue trop petite ({queue_size} < {threshold}), no-op.",
+            "queue_size": queue_size,
+            "threshold": threshold,
+            "scored": 0,
         }
+
+    pending_ids = [d["productid"] for d in db["X_to_predict"].find({}, {"productid": 1})]
+    print(f"Scoring de {len(pending_ids)} samples en attente")
+
+    result = score_productids(pending_ids)
+
+    # Suppression ciblée par $in plutôt que delete_many({}) pour préserver
+    # les nouveaux samples injectés pendant le scoring (race condition).
+    delete_result = db["X_to_predict"].delete_many({"productid": {"$in": pending_ids}})
+    print(f"Retiré de la queue : {delete_result.deleted_count} samples")
+
+    return result
+
+
+@app.post("/rescore_all")
+def rescore_all(user: dict = Depends(get_current_user)):
+    """Re-score toute la base Prediction avec le modèle champion actuel."""
+    nb_of_requests_counter.labels(method='POST', endpoint='/rescore_all').inc()
+
+    all_predicted = [d["productid"] for d in db["Prediction"].find({}, {"productid": 1})]
+    if not all_predicted:
+        return {"message": "Rien à rescorer.", "scored": 0}
+
+    return score_productids(all_predicted)
     
 class PreprocessRequest(BaseModel):
     batch_id: int
