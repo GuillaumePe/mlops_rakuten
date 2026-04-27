@@ -76,12 +76,15 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise credentials_exception
 #fonction de conversion types numpy vers types natifs Python
 def convert_types(doc):
-    return {
-        k: (
-            v.item() if isinstance(v, (np.generic, np.ndarray)) else v
-        )
-        for k, v in doc.items()
-    }
+    out = {}
+    for k, v in doc.items():
+        if isinstance(v, np.ndarray):
+            out[k] = v.tolist() if v.ndim > 0 else v.item()
+        elif isinstance(v, np.generic):
+            out[k] = v.item()
+        else:
+            out[k] = v
+    return out
 
 
 # ==== APP ====
