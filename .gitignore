@@ -92,3 +92,11 @@ target/
 # Venv
 rakuten_venv/
 
+# MLflow local artifacts
+mlruns/
+mlartifacts/
+
+# Local data caches
+*.parquet.tmp
+.tmp/
+EOF
