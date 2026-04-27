@@ -1,15 +1,14 @@
 # ============================================================================
-# Index PyTorch CPU (résout les wheels +cpu de torch / torchvision / torchaudio)
+# Index PyTorch CPU
 # ============================================================================
 --extra-index-url https://download.pytorch.org/whl/cpu
 
 # ============================================================================
-# Stack PyTorch — CPU local (l'entraînement lourd part sur RunPod GPU)
+# Stack PyTorch — wheels CPU
 # ----------------------------------------------------------------------------
-# torch 2.8.0 (août 2025) : 8 mois de maturité, dernier cycle pré-2.9.
-# torchvision 0.23.0 : appairage officiel torch 2.8 (cf. pytorch.org/get-started/previous-versions).
-# torchaudio 2.8.0 : appairé idem ; utile pour évolutions futures (audio multimodal),
-#                    et tiré indirectement par certaines deps HF — mieux vaut le pinner explicitement.
+# torch 2.8.0 (août 2025) : version stable mature.
+# torchvision 0.23.0 / torchaudio 2.8.0 : appairage officiel torch 2.8
+# (cf. pytorch.org/get-started/previous-versions).
 # ============================================================================
 torch==2.8.0+cpu
 torchvision==0.23.0+cpu
@@ -18,9 +17,8 @@ torchaudio==2.8.0+cpu
 # ============================================================================
 # PyTorch Lightning
 # ----------------------------------------------------------------------------
-# 2.6.1 (jan 2026) : patche explicitement le bug "missing device id for pytorch 2.8"
-# (#21105). PL 2.5.x + torch 2.8 a un bug connu sur la sélection de device en multi-GPU.
-# Donc PL 2.6.1 est l'appariement correct avec torch 2.8.0.
+# 2.6.1 (jan 2026) : patche le bug "missing device id for pytorch 2.8" (#21105).
+# PL 2.5.x + torch 2.8 a un bug connu sur la sélection de device.
 # ============================================================================
 pytorch-lightning==2.6.1
 lightning-utilities==0.11.9
@@ -28,19 +26,12 @@ lightning-utilities==0.11.9
 # ============================================================================
 # Hugging Face — texte / embeddings / fine-tuning
 # ----------------------------------------------------------------------------
-# transformers 4.51.3 conservé : version stable et déjà validée dans votre repo.
-#   Ne PAS sauter vers transformers v5 maintenant : breaking changes sur Trainer,
-#   logging et signatures de modèles → risque sans bénéfice avant Phase 1.
-#
+# transformers 4.51.3 : version 4.x stable. Pas de saut vers v5 pour l'instant
+#   (breaking changes Trainer / logging / signatures).
 # sentence-transformers 5.1.2 (oct 2025) : dernière 5.1.x avant que v5.2+
-#   introduise la compat transformers v5 (qui ferait friction avec notre 4.51).
-#   Validée explicitement contre `transformers v4.41+`.
-#
-# tokenizers / huggingface-hub / safetensors : alignés sur transformers 4.51.
-#
+#   bascule la compat sur transformers v5.
 # accelerate 1.2.1 : runtime requis par Trainer / fp16 / multi-device.
-# peft 0.14.0 : LoRA / adapters. Préparation M3 (fine-tuning frugal des encodeurs).
-# datasets 3.2.0 : préparation des phases où on voudra streamer des batches HF.
+# peft 0.14.0 : LoRA / adapters.
 # ============================================================================
 transformers==4.51.3
 sentence-transformers==5.1.2
@@ -49,20 +40,16 @@ huggingface-hub==0.30.2
 safetensors==0.5.3
 accelerate==1.2.1
 peft==0.14.0
-datasets==3.2.0
 
 # ============================================================================
 # Vision — modèles d'images
 # ----------------------------------------------------------------------------
-# timm 1.0.12 (nov 2025) : zoo de backbones vision (ResNet18, EfficientNet,
-#   ConvNeXt, ViT-tiny, etc.). Indispensable dès qu'on regarde au-delà des
-#   modèles torchvision pour M3/M4. À ce stade Phase 0, on s'en sert pour
-#   l'extraction ResNet18 features.
+# timm : zoo de backbones (ResNet, EfficientNet, ConvNeXt, ViT, etc.).
 # ============================================================================
 timm==1.0.12
 
 # ============================================================================
-# ML classique — pipelines sklearn (M2)
+# ML classique
 # ============================================================================
 scikit-learn==1.6.1
 scikit-optimize==0.10.2
@@ -81,7 +68,7 @@ polars==0.20.31
 pyarrow==19.0.1
 
 # ============================================================================
-# MLOps — tracking, versioning, pipelines, monitoring
+# MLOps — tracking, versioning, monitoring
 # ============================================================================
 mlflow==3.1.1
 mlflow-skinny==3.1.1
@@ -99,7 +86,7 @@ dagshub==0.5.9
 dagshub-annotation-converter==0.1.9
 
 # ============================================================================
-# API / Backend — FastAPI app
+# API / Backend
 # ============================================================================
 fastapi==0.115.12
 uvicorn==0.34.2
@@ -189,8 +176,7 @@ frozenlist==1.5.0
 propcache==0.3.1
 
 # ============================================================================
-# Celery / task queue (Airflow ne l'utilise plus en LocalExecutor mais reste
-# tiré par certaines deps DVC/dagshub)
+# Celery / task queue
 # ============================================================================
 celery==5.5.1
 kombu==5.5.3
@@ -313,7 +299,7 @@ networkx==3.4.2
 grandalf==0.8
 pycparser==2.22
 cffi==1.17.1
-sympy==1.13.1
+sympy==1.13.3
 mpmath==1.3.0
 exceptiongroup==1.2.2
 
@@ -331,7 +317,7 @@ flufl.lock==8.1.0
 zc.lockfile==3.0.post1
 
 # ============================================================================
-# Protobuf / serialisation
+# Protobuf / sérialisation
 # ============================================================================
 protobuf==5.29.4
 Deprecated==1.2.18
