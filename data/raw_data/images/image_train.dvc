@@ -1,0 +1,6 @@
+outs:
+- md5: d29a5e5a3b12a64121b7e6b1179a16e5.dir
+  size: 2257219410
+  nfiles: 84916
+  hash: md5
+  path: image_train
