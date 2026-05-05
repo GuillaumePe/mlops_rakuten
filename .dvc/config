@@ -1,0 +1,5 @@
+[core]
+    remote = r2
+['remote "r2"']
+    url = s3://rakuten-mlops-dvc/dvc-storage
+    endpointurl = https://2321337a556901d537efb7d2e2271290.r2.cloudflarestorage.com
