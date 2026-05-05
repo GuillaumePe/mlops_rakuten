@@ -24,9 +24,13 @@ from requests.auth import HTTPBasicAuth
 
 
 # Configuration
-SECRET_KEY = "rakuten_secret_key"  
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY env var is not set. Check your .env file.")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+
 repo_owner = 'GuillaumePe'
 repo_name = 'mar25_cmlops_rakuten'
 db_client = MongoClient("mongodb://mongodb:27017")
@@ -35,15 +39,15 @@ Mlflow_tracking_uri = "http://mlflow:5000"
 IMAGE_FOLDER_TRAIN = "data/raw_data/images/image_train"
 IMAGE_FOLDER_TEST = "data/raw_data_test/images/image_test"
 
-
 #User DB
 users_db = {
-    "admin": {
-        "username": "admin",
-        "password": "123admin"  
+    os.getenv("API_USERNAME", "admin"): {
+        "username": os.getenv("API_USERNAME", "admin"),
+        "password": os.getenv("API_PASSWORD"),
     }
 }
-
+if not users_db[os.getenv("API_USERNAME", "admin")]["password"]:
+    raise RuntimeError("API_PASSWORD env var is not set.")
 
 
 

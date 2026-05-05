@@ -56,10 +56,12 @@ x-airflow-common: &airflow-common
     AIRFLOW__API__AUTH_BACKEND: "airflow.api.auth.backend.basic_auth"
     AIRFLOW__SMTP__SMTP_HOST: "smtp.gmail.com"
     AIRFLOW__SMTP__SMTP_PORT: 587
-    AIRFLOW__SMTP__SMTP_USER: "de.airflow@gmail.com"
-    AIRFLOW__SMTP__SMTP_PASSWORD: "cfsrvkongsobheta"
-    AIRFLOW__SMTP__SMTP_MAIL_FROM: "de.airflow@gmail.com"
+    AIRFLOW__SMTP__SMTP_USER: "${AIRFLOW_SMTP_USER}"
+    AIRFLOW__SMTP__SMTP_PASSWORD: "${AIRFLOW_SMTP_PASSWORD}"
+    AIRFLOW__SMTP__SMTP_MAIL_FROM: "${AIRFLOW_SMTP_USER}"
     AIRFLOW__WEBSERVER__WORKER_TIMEOUT: 300
+    API_USERNAME: "${API_USERNAME}"
+    API_PASSWORD: "${API_PASSWORD}"
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:- pymongo}
   volumes:
     - ./src/airflow/dags:/opt/airflow/dags
@@ -95,9 +97,9 @@ services:
     container_name: postgres
     restart: always
     environment:
-      POSTGRES_USER: mlflow
-      POSTGRES_PASSWORD: mlflowpwd
-      POSTGRES_DB: mlflow_db
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${POSTGRES_DB}"
     ports:
       - "5432:5432"
     volumes:
@@ -184,12 +186,14 @@ services:
       <<: *airflow-common-env
       _AIRFLOW_DB_UPGRADE: "true"
       _AIRFLOW_WWW_USER_CREATE: "true"
-      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
-      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+      _AIRFLOW_WWW_USER_USERNAME: "${_AIRFLOW_WWW_USER_USERNAME}"
+      _AIRFLOW_WWW_USER_PASSWORD: "${_AIRFLOW_WWW_USER_PASSWORD}"
   
   airflow-variable-init:
     <<: *airflow-common
     container_name: airflow-variable-init
+    environment:
+      <<: *airflow-common-env
     command: >
       bash -c "
       echo 'Attente du webserver...';
@@ -225,7 +229,7 @@ services:
     command: [
       #"/wait-for-it.sh", "postgres", "5432", "--",
       "mlflow", "server",
-      "--backend-store-uri=postgresql://mlflow:mlflowpwd@postgres:5432/mlflow_db",
+      "--backend-store-uri=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}",
       "--default-artifact-root=/mlflow/mlruns",
       "--host", "0.0.0.0",
       "--port", "5000",
@@ -263,6 +267,10 @@ services:
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - MLFLOW_ARTIFACT_ROOT=/mlflow/mlruns
       - PYTHONUNBUFFERED=1
+      - SECRET_KEY="${SECRET_KEY}"
+      - AIRFLOW_API_USER="${_AIRFLOW_WWW_USER_USERNAME}"
+      - AIRFLOW_API_PASSWORD="${_AIRFLOW_WWW_USER_PASSWORD}"
+      - MONGO_URI="${MONGO_URI}"
     depends_on:
       mongodb:
         condition: service_healthy
