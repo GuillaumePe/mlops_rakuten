@@ -1,0 +1,37 @@
+# === Trainer cloud GPU : extraction + training + HPO ===
+# Versions épinglées en cohérence avec requirements.txt racine.
+# Note : torch+torchvision sont fournis par la base image PyTorch CUDA,
+# on ne les réinstalle pas pour éviter le conflit GPU/CPU wheels.
+
+# Data access
+pymongo==4.13.2
+python-dotenv==1.0.1
+
+# ML core
+scikit-learn==1.6.1
+lightgbm==4.6.0
+sentence-transformers==5.1.2
+transformers==4.51.3
+tokenizers==0.21.1
+huggingface-hub==0.30.2
+accelerate==1.2.1
+safetensors==0.5.3
+Pillow==11.2.1
+polars==0.20.31
+numpy==1.26.4
+pyarrow==19.0.1
+
+# Training-specific
+optuna==4.3.0
+pytorch-lightning==2.6.1
+lightning-utilities==0.11.9
+matplotlib==3.10.1
+seaborn==0.13.2
+PyYAML==6.0.2
+
+# Tracking + versioning
+mlflow==3.1.1
+dvc==3.55.2
+dvc-s3==3.2.0
+pathspec==0.12.1
+boto3==1.37.1

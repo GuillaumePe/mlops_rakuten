@@ -80,6 +80,17 @@ class JobResult:
     exit_code: Optional[int] = None
     duration_seconds: Optional[float] = None
 
+@dataclass
+class VolumeMount:
+    """
+    Volume persistant à attacher au container.
+    
+    Si le provider ne supporte pas les volumes persistants, le job tournera
+    sans (et les caches seront perdus à chaque pod).
+    """
+    volume_id: str          # ID du volume côté provider (créé hors du code)
+    mount_path: str         # chemin de montage dans le container (ex: /workspace/cache)
+
 
 class CloudProvider(ABC):
     """Interface commune des providers cloud GPU."""
@@ -123,15 +134,5 @@ class CloudProvider(ABC):
     def stop(self, handle: JobHandle) -> None:
         """Arrête le job (graceful)."""
 
-    @dataclass
-    class VolumeMount:
-        """
-        Volume persistant à attacher au container.
     
-        Si le provider ne supporte pas les volumes persistants, le job tournera
-        sans (et les caches seront perdus à chaque pod).
-        """
-        volume_id: str          # ID du volume côté provider (créé hors du code)
-        mount_path: str         # chemin de montage dans le container (ex: /workspace/cache)
-
 
