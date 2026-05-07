@@ -1,0 +1,30 @@
+.git
+.venv
+.dvc/cache
+.dvc/tmp
+.dvc/config.local
+
+# Exclure les vrais fichiers data, garder les pointeurs .dvc
+data/raw_data/X_train_update.csv
+data/raw_data/Y_train_update.csv
+data/raw_data/images/image_train/
+data/raw_data_test/X_test_update.csv
+data/raw_data_test/images_test/
+data/cache
+data/preprocessed
+
+# Reste
+mlruns_test/
+mlruns/
+__pycache__
+*.pyc
+.pytest_cache
+*.egg-info
+notebooks/
+docker-compose*.yml
+README.md
+TECH_DEBT.md
+*.log
+.env
+.env.local
+mongo_dump_local/

@@ -40,7 +40,8 @@ RUN pip install --no-cache-dir -v -r requirements.txt
 # Copié après les deps pour minimiser les rebuilds quand seul le code change.
 COPY src/ /workspace/src/
 COPY .dvc/config /workspace/.dvc/config
-
+# === Fichiers dvc ===
+COPY data/ /workspace/data/
 # === Entrypoint ===
 # Le script gère le cycle DVC pull → command → DVC push
 COPY docker/trainer/entrypoint.sh /workspace/entrypoint.sh

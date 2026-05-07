@@ -17,6 +17,9 @@ import argparse
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()  # charge .env automatiquement
+
 import mlflow
 import yaml
 
@@ -24,8 +27,6 @@ from src.experiments.datamodule.rakuten_datamodule import RakutenLightningDataMo
 from src.experiments.models.m2.m2 import M2Stacking
 from src.experiments.strategies.sklearn_experiment import SklearnExperiment
 import os
-from src.cloud.factory import get_cloud_provider
-from src.cloud.base import JobConfig, GPUSpec, VolumeMount
 
 
 CONFIG_DIR = Path("src/experiments/config")
@@ -117,11 +118,15 @@ def cmd_evaluate(dm: RakutenLightningDataModule, experiment: SklearnExperiment):
 
 def cmd_submit_cloud(args, config: dict):
     """
-    Soumet un job au provider cloud.
+    Soumet un job au provider cloud avec fallback sur la liste de GPUs.
     
     Le pod cloud va exécuter `runner.py --action <cloud-action>` après
     avoir pull les données via DVC. Il push les nouveaux artefacts à la fin.
     """
+    from src.cloud.factory import get_cloud_provider
+    from src.cloud.base import JobConfig, GPUSpec, VolumeMount
+    from src.cloud.exceptions import JobSubmissionError
+    
     if args.cloud_action is None:
         raise ValueError("--cloud-action requis pour --action submit_cloud")
     
@@ -143,7 +148,6 @@ def cmd_submit_cloud(args, config: dict):
     if args.mlflow_tracking_uri:
         pod_command += ["--mlflow-tracking-uri", args.mlflow_tracking_uri]
     
-    # Env vars critiques à passer au pod
     pod_env = {
         # R2 (DVC remote)
         "R2_ACCESS_KEY_ID": os.getenv("R2_ACCESS_KEY_ID", ""),
@@ -151,18 +155,20 @@ def cmd_submit_cloud(args, config: dict):
         # MongoDB Atlas
         "MONGO_URI": os.getenv("MONGO_URI", ""),
         "MONGO_DB_NAME": os.getenv("MONGO_DB_NAME", "MAR25_CMLOPS_RAKUTEN"),
-        # MLflow tracking (URL publique tunnel ou Dagshub)
+        # MLflow tracking
         "MLFLOW_TRACKING_URI": args.mlflow_tracking_uri or os.getenv("MLFLOW_TRACKING_URI", ""),
-        # Quels .dvc puller (sinon dvc pull tout)
-        "DVC_PULL_TARGETS": (
-            "data/raw_data/X_train_update.csv.dvc "
-            "data/raw_data/Y_train_update.csv.dvc "
-            "data/raw_data/images/image_train.dvc"
-        ),
         # DVC auto-push à la fin si succès
         "DVC_AUTO_PUSH": "true",
+        "DATA_ROOT": "/workspace",
     }
     
+    # Targets DVC à puller (par défaut tout, override possible via CLI)
+    dvc_targets = args.cloud_dvc_targets or [
+        "data/raw_data/X_train_update.csv.dvc",
+        "data/raw_data/Y_train_update.csv.dvc",
+        "data/raw_data/images/image_train.tar.zst.dvc",
+    ]
+    pod_env["DVC_PULL_TARGETS"] = " ".join(dvc_targets)
     # Vérifier les vars critiques
     for key in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "MONGO_URI"):
         if not pod_env[key]:
@@ -180,27 +186,42 @@ def cmd_submit_cloud(args, config: dict):
     else:
         print("[submit_cloud] Pas de volume cache (RUNPOD_VOLUME_ID non défini)")
     
-    # Job config
-    job_config = JobConfig(
-        image=image,
-        command=pod_command,
-        env=pod_env,
-        gpu=GPUSpec(gpu_type=args.gpu_type, count=1),
-        volumes=volumes,
-        name=f"rakuten-{args.experiment}-{args.cloud_action}",
-    )
-    
     print(f"[submit_cloud] Image      : {image}")
-    print(f"[submit_cloud] GPU        : {args.gpu_type}")
+    print(f"[submit_cloud] GPUs cibles : {args.gpu_types}")
     print(f"[submit_cloud] Commande   : {' '.join(pod_command)}")
     print(f"[submit_cloud] Timeout    : {args.cloud_timeout}s")
     
-    # Submit
+    # Submit avec fallback sur la liste de GPUs
     provider = get_cloud_provider()
     print(f"[submit_cloud] Provider   : {provider.name}")
-    print(f"[submit_cloud] Soumission du job...")
-    handle = provider.submit_job(job_config)
-    print(f"[submit_cloud] Job ID     : {handle.job_id}")
+    
+    handle = None
+    last_error = None
+    for gpu_type in args.gpu_types:
+        print(f"[submit_cloud] Tentative GPU : {gpu_type}")
+        job_config = JobConfig(
+            image=image,
+            command=pod_command,
+            env=pod_env,
+            gpu=GPUSpec(gpu_type=gpu_type, count=1),
+            volumes=volumes,
+            name=f"rakuten-{args.experiment}-{args.cloud_action}",
+        )
+        try:
+            handle = provider.submit_job(job_config)
+            print(f"[submit_cloud] ✓ Pod provisionné avec {gpu_type}")
+            print(f"[submit_cloud] Job ID     : {handle.job_id}")
+            break
+        except JobSubmissionError as e:
+            print(f"[submit_cloud] ✗ {gpu_type} indispo : {e}")
+            last_error = e
+            continue
+    
+    if handle is None:
+        raise RuntimeError(
+            f"Aucun GPU dispo dans la liste {args.gpu_types}. "
+            f"Dernière erreur : {last_error}"
+        )
     
     # Wait
     print(f"[submit_cloud] Attente de la fin du job...")
@@ -249,11 +270,11 @@ def main():
         help="(submit_cloud only) Quelle action le pod cloud doit exécuter",
     )
     parser.add_argument(
-        "--gpu-type",
-        default="rtx_a4000",
-        choices=["rtx_a4000", "rtx_3090", "rtx_4090", "a100_40gb"],
-        help="(submit_cloud only) Type de GPU à provisionner",
-    )
+    "--gpu-types",
+    nargs="+",
+    default=["rtx_4090", "rtx_3090", "rtx_a4000", "a100_40gb"],
+    help="(submit_cloud) Liste de GPUs à essayer en cascade (du préféré au fallback)",
+)
     parser.add_argument(
         "--cloud-image",
         default=None,
@@ -264,6 +285,12 @@ def main():
         type=int,
         default=3600,
         help="(submit_cloud only) Timeout en secondes (défaut 1h)",
+    )
+    parser.add_argument(
+    "--cloud-dvc-targets",
+    nargs="+",
+    default=None,
+    help="(submit_cloud) Liste des .dvc à puller. Défaut : X_train + Y_train + images.",
     )
     args = parser.parse_args()
 
@@ -287,11 +314,14 @@ def main():
         cmd_submit_cloud(args, config)
         return
 
-    # Pour les autres actions, init MLflow local
-    mlflow.set_tracking_uri(tracking_uri)
-    print(f"[Runner] MLflow tracking URI : {tracking_uri}")
-    experiment_name = config["mlflow"].get("experiment_name", args.experiment)
-    mlflow.set_experiment(experiment_name)
+    # Init MLflow seulement pour les actions qui en ont besoin
+    if args.action in ("fit", "evaluate", "fit_and_evaluate"):
+        mlflow.set_tracking_uri(tracking_uri)
+        print(f"[Runner] MLflow tracking URI : {tracking_uri}")
+        experiment_name = config["mlflow"].get("experiment_name", args.experiment)
+        mlflow.set_experiment(experiment_name)
+    else:
+        print(f"[Runner] Action '{args.action}' : pas d'init MLflow nécessaire")
 
     # Construire les composants
     builder = EXPERIMENT_BUILDERS[args.experiment]

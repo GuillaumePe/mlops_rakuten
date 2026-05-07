@@ -128,12 +128,7 @@ class RunPodProvider(CloudProvider):
 
     # --- wait -------------------------------------------------------------
 
-    def wait(
-        self,
-        handle: JobHandle,
-        timeout_seconds: Optional[int] = None,
-        poll_interval_seconds: int = 10,
-    ) -> JobResult:
+    def wait(self, handle: JobHandle, timeout_seconds: Optional[int] = None, poll_interval_seconds: int = 10,) -> JobResult:
         start = time.time()
         last_status = JobStatus.UNKNOWN
 
@@ -151,6 +146,14 @@ class RunPodProvider(CloudProvider):
 
         duration = time.time() - start
         logs = self.fetch_logs(handle, follow=False)
+
+        # Stop explicit du pod pour arrêter la facturation
+        # (RunPod ne stoppe pas automatiquement les pods éphémères)
+        try:
+            self.stop(handle)
+        except Exception as e:
+            print(f"[RunPodProvider] WARN: stop a échoué : {e}")
+
         return JobResult(
             handle=handle,
             status=last_status,

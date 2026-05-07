@@ -45,9 +45,10 @@ from src.features.utils import clean_description  # legacy, à refondre en Bloc 
 # Constantes Mongo et chemins data
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
 DB_NAME = "MAR25_CMLOPS_RAKUTEN"
-IMAGE_FOLDER_TRAIN = Path("data/raw_data/images/image_train")
-CACHE_DIR = Path("data/cache")
 
+DATA_ROOT = Path(os.getenv("DATA_ROOT", "."))
+IMAGE_FOLDER_TRAIN = DATA_ROOT / "data/raw_data/images/image_train"
+CACHE_DIR = DATA_ROOT / "data/cache"
 
 class RakutenLightningDataModule(pl_lightning.LightningDataModule):
     """

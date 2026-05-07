@@ -46,6 +46,58 @@ else
     dvc pull -v
 fi
 
+# === 4.5. Extraction du blob images si présent ===
+BLOB_PATH="/workspace/data/raw_data/images/image_train.tar.zst"
+EXTRACTED_DIR="/workspace/cache/images/image_train"
+SYMLINK_PATH="/workspace/data/raw_data/images/image_train"
+
+if [ -f "$BLOB_PATH" ]; then
+    # Compter le cache existant
+    if [ -d "$EXTRACTED_DIR" ]; then
+        N_EXISTING=$(ls "$EXTRACTED_DIR" 2>/dev/null | wc -l)
+    else
+        N_EXISTING=0
+    fi
+    echo "[$(date +%T)] Cache existant : $N_EXISTING fichiers"
+    
+    if [ "$N_EXISTING" -ge 84000 ]; then
+        echo "[$(date +%T)] Cache complet, on réutilise"
+    else
+        echo "[$(date +%T)] Cache incomplet ($N_EXISTING < 84000), re-extraction..."
+        
+        # Extraction dans un dossier temporaire
+        TEMP_DIR="/workspace/cache/images/_extract_tmp"
+        rm -rf "$TEMP_DIR"
+        mkdir -p "$TEMP_DIR"
+        
+        echo "[$(date +%T)] Décompression zstd..."
+        zstd -d "$BLOB_PATH" -c | tar -xf - -C "$TEMP_DIR" --no-same-owner --no-same-permissions
+        echo "[$(date +%T)] Décompression terminée"
+        
+        N_EXTRACTED=$(ls "$TEMP_DIR/image_train" 2>/dev/null | wc -l)
+        echo "[$(date +%T)] $N_EXTRACTED fichiers extraits"
+        
+        if [ "$N_EXTRACTED" -lt 84000 ]; then
+            echo "[ERROR] Extraction incomplète ($N_EXTRACTED < 84000), abort"
+            exit 1
+        fi
+        
+        # Swap atomique : ancien cache → temp → renommage
+        echo "[$(date +%T)] Swap du cache..."
+        rm -rf "$EXTRACTED_DIR"
+        mv "$TEMP_DIR/image_train" "$EXTRACTED_DIR"
+        rm -rf "$TEMP_DIR"
+        echo "[$(date +%T)] Swap terminé"
+    fi
+    
+    # Symlink
+    rm -rf "$SYMLINK_PATH" 2>/dev/null
+    ln -sfn "$EXTRACTED_DIR" "$SYMLINK_PATH"
+    echo "[$(date +%T)] Symlink créé : $SYMLINK_PATH → $EXTRACTED_DIR"
+    echo "[$(date +%T)] Test 5 fichiers : $(ls $SYMLINK_PATH | head -5 | tr '\n' ' ')"
+fi
+
+cd /workspace
 # === 5. Exécution de la commande ===
 echo "[Entrypoint] Exécution : $*"
 "$@"
@@ -63,3 +115,12 @@ else
 fi
 
 exit $EXIT_CODE
+
+# Self-terminate le pod via API RunPod
+if [ -n "${RUNPOD_API_KEY:-}" ] && [ -n "${RUNPOD_POD_ID:-}" ]; then
+    curl -X POST "https://api.runpod.io/graphql" \
+         -H "Authorization: Bearer $RUNPOD_API_KEY" \
+         -H "Content-Type: application/json" \
+         --data "{\"query\":\"mutation { podTerminate(input: {podId: \\\"$RUNPOD_POD_ID\\\"}) { id } }\"}" \
+         > /dev/null 2>&1 || true
+fi
