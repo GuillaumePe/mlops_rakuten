@@ -102,3 +102,21 @@ mlartifacts/
 .tmp/
 EOF
 /test_dvc.txt
+
+# Mongo dumps (données brutes, à ne JAMAIS commit)
+mongo_dump_local/
+*.bson
+*.metadata.json
+
+# DVC-tracked outputs (gérés par DVC remote, pas Git)
+data/cache/*.parquet
+data/cache/*.pkl
+
+# Mongo dumps (données brutes, à ne JAMAIS commit)
+mongo_dump_local/
+*.bson
+*.metadata.json
+
+# DVC-tracked outputs (gérés par DVC remote, pas Git)
+data/cache/*.parquet
+data/cache/*.pkl

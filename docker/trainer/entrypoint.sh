@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail
 
 cd /workspace
 
@@ -100,9 +100,10 @@ fi
 cd /workspace
 # === 5. Exécution de la commande ===
 echo "[Entrypoint] Exécution : $*"
+set +e
 "$@"
 EXIT_CODE=$?
-
+set -e
 # === 6. DVC push si succès et DVC_AUTO_PUSH=true ===
 if [ "$EXIT_CODE" -eq 0 ] && [ "${DVC_AUTO_PUSH:-false}" = "true" ]; then
     echo "[Entrypoint] DVC push des nouveaux artefacts..."
@@ -114,13 +115,25 @@ else
     echo "[Entrypoint] Pas de push (exit=$EXIT_CODE, DVC_AUTO_PUSH=${DVC_AUTO_PUSH:-false})"
 fi
 
-exit $EXIT_CODE
+# === Self-terminate du pod ===
+# RunPod ne stoppe pas automatiquement les pods éphémères : on s'auto-kill.
+echo "[$(date +%T)] Self-terminate du pod..."
+echo "[Debug] RUNPOD_POD_ID = ${RUNPOD_POD_ID:-NOT_SET}"
+echo "[Debug] RUNPOD_API_KEY présent ? ${RUNPOD_API_KEY:+yes}"
 
-# Self-terminate le pod via API RunPod
 if [ -n "${RUNPOD_API_KEY:-}" ] && [ -n "${RUNPOD_POD_ID:-}" ]; then
-    curl -X POST "https://api.runpod.io/graphql" \
+    echo "[Debug] Appel API RunPod..."
+    RESPONSE=$(curl -s -X POST "https://api.runpod.io/graphql" \
          -H "Authorization: Bearer $RUNPOD_API_KEY" \
          -H "Content-Type: application/json" \
-         --data "{\"query\":\"mutation { podTerminate(input: {podId: \\\"$RUNPOD_POD_ID\\\"}) { id } }\"}" \
-         > /dev/null 2>&1 || true
+         --data "{\"query\":\"mutation { podTerminate(input: {podId: \\\"$RUNPOD_POD_ID\\\"}) }\"}")
+    echo "[Debug] Réponse API : $RESPONSE"
+    sleep 5
+else
+    echo "[Debug] Self-terminate skipé (env vars manquantes)"
 fi
+
+exit $EXIT_CODE
+
+
+exit $EXIT_CODE

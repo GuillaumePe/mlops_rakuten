@@ -21,10 +21,28 @@ from src.cloud.exceptions import (
 # Mapping aliases logiques → IDs GPU RunPod (à compléter selon la dispo réelle)
 # Liste consultable via runpod.get_gpus() une fois authentifié
 RUNPOD_GPU_MAP = {
-    "rtx_a4000": "NVIDIA RTX A4000",
-    "rtx_3090": "NVIDIA GeForce RTX 3090",
+    # Gamer/perf
     "rtx_4090": "NVIDIA GeForce RTX 4090",
-    "a100_40gb": "NVIDIA A100 80GB PCIe",  # 40GB peut être indispo selon les régions
+    "rtx_3090": "NVIDIA GeForce RTX 3090",
+    "rtx_3090_ti": "NVIDIA GeForce RTX 3090 Ti",
+    "rtx_4080": "NVIDIA GeForce RTX 4080",
+    "rtx_4080_super": "NVIDIA GeForce RTX 4080 SUPER",
+    "rtx_5090": "NVIDIA GeForce RTX 5090",
+    "rtx_5080": "NVIDIA GeForce RTX 5080",
+    # Workstation
+    "rtx_a4000": "NVIDIA RTX A4000",
+    "rtx_a4500": "NVIDIA RTX A4500",
+    "rtx_a5000": "NVIDIA RTX A5000",
+    "rtx_a6000": "NVIDIA RTX A6000",
+    "rtx_4000_ada": "NVIDIA RTX 4000 Ada Generation",
+    "rtx_5000_ada": "NVIDIA RTX 5000 Ada Generation",
+    # Datacenter
+    "l4": "NVIDIA L4",
+    "l40": "NVIDIA L40",
+    "l40s": "NVIDIA L40S",
+    "a40": "NVIDIA A40",
+    "a100_40gb": "NVIDIA A100-SXM4-40GB",
+    "a100_80gb": "NVIDIA A100 80GB PCIe",
 }
 
 
@@ -82,6 +100,8 @@ class RunPodProvider(CloudProvider):
                 env=config.env,
                 docker_args=" ".join(config.command),  # commande de démarrage
                 cloud_type="SECURE",          # ou "COMMUNITY" si moins cher dispo
+                start_ssh=False,                
+                support_public_ip=False,        
                 **volume_kwargs,
             )
         except Exception as e:
@@ -102,11 +122,14 @@ class RunPodProvider(CloudProvider):
         try:
             pod = runpod.get_pod(handle.job_id)
         except Exception as e:
-            raise JobFailedError(f"RunPod get_pod failed: {e}") from e
-
+            # Pod absent → terminé (self-terminate ou expiration)
+            print(f"[RunPodProvider] Pod {handle.job_id} introuvable, considéré comme SUCCEEDED")
+            return JobStatus.SUCCEEDED
+    
         if not pod:
-            return JobStatus.UNKNOWN
-
+            # Réponse vide → pod terminé
+            return JobStatus.SUCCEEDED
+    
         runtime_status = pod.get("desiredStatus", "UNKNOWN")
         return RUNPOD_STATUS_MAP.get(runtime_status, JobStatus.UNKNOWN)
 

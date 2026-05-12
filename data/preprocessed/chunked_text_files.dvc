@@ -1,6 +1,0 @@
-outs:
-- md5: 7a648fbbbbbd46aea862b935431d203a.dir
-  size: 236488843
-  nfiles: 9
-  hash: md5
-  path: chunked_text_files

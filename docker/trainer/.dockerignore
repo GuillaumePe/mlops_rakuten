@@ -3,10 +3,14 @@
 .dvc/cache
 .dvc/tmp
 .dvc/config.local
-data/raw_data
-data/raw_data_test
-data/cache
-data/preprocessed
+
+# Excluve les vrais fichiers de data/ (gros)
+# mais GARDE les .dvc files (légers, nécessaires)
+data/**
+!data/**/*.dvc
+!data/**/.gitignore
+
+# Reste
 mlruns_test/
 mlruns/
 __pycache__

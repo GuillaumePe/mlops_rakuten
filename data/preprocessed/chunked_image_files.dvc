@@ -1,6 +1,0 @@
-outs:
-- md5: 3cf6020f9fda9a9e100848562e0b7431.dir
-  size: 177124263
-  nfiles: 9
-  hash: md5
-  path: chunked_image_files

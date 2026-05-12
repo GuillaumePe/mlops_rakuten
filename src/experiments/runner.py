@@ -123,8 +123,9 @@ def cmd_submit_cloud(args, config: dict):
     Le pod cloud va exécuter `runner.py --action <cloud-action>` après
     avoir pull les données via DVC. Il push les nouveaux artefacts à la fin.
     """
+    import time
     from src.cloud.factory import get_cloud_provider
-    from src.cloud.base import JobConfig, GPUSpec, VolumeMount
+    from src.cloud.base import JobConfig, GPUSpec, VolumeMount, JobStatus
     from src.cloud.exceptions import JobSubmissionError
     
     if args.cloud_action is None:
@@ -148,6 +149,7 @@ def cmd_submit_cloud(args, config: dict):
     if args.mlflow_tracking_uri:
         pod_command += ["--mlflow-tracking-uri", args.mlflow_tracking_uri]
     
+    # Env vars critiques à passer au pod
     pod_env = {
         # R2 (DVC remote)
         "R2_ACCESS_KEY_ID": os.getenv("R2_ACCESS_KEY_ID", ""),
@@ -155,20 +157,24 @@ def cmd_submit_cloud(args, config: dict):
         # MongoDB Atlas
         "MONGO_URI": os.getenv("MONGO_URI", ""),
         "MONGO_DB_NAME": os.getenv("MONGO_DB_NAME", "MAR25_CMLOPS_RAKUTEN"),
-        # MLflow tracking
+        # MLflow
         "MLFLOW_TRACKING_URI": args.mlflow_tracking_uri or os.getenv("MLFLOW_TRACKING_URI", ""),
-        # DVC auto-push à la fin si succès
-        "DVC_AUTO_PUSH": "true",
+        # Self-terminate
+        "RUNPOD_API_KEY": os.getenv("RUNPOD_API_KEY", ""),
+        # DATA_ROOT pour les paths
         "DATA_ROOT": "/workspace",
+        # DVC auto-push
+        "DVC_AUTO_PUSH": "true",
     }
     
-    # Targets DVC à puller (par défaut tout, override possible via CLI)
+    # Targets DVC à puller
     dvc_targets = args.cloud_dvc_targets or [
         "data/raw_data/X_train_update.csv.dvc",
         "data/raw_data/Y_train_update.csv.dvc",
         "data/raw_data/images/image_train.tar.zst.dvc",
     ]
     pod_env["DVC_PULL_TARGETS"] = " ".join(dvc_targets)
+    
     # Vérifier les vars critiques
     for key in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "MONGO_URI"):
         if not pod_env[key]:
@@ -223,10 +229,33 @@ def cmd_submit_cloud(args, config: dict):
             f"Dernière erreur : {last_error}"
         )
     
-    # Wait
+    # Wait avec polling visible (debug)
     print(f"[submit_cloud] Attente de la fin du job...")
+    start = time.time()
+    poll_count = 0
+    last_status = JobStatus.UNKNOWN
+    
     try:
-        result = provider.wait(handle, timeout_seconds=args.cloud_timeout)
+        while True:
+            poll_count += 1
+            last_status = provider.get_status(handle)
+            elapsed = int(time.time() - start)
+            print(f"[submit_cloud] [t={elapsed}s] Poll #{poll_count} : status={last_status.value}")
+            
+            if last_status in (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.STOPPED):
+                break
+            
+            if elapsed > args.cloud_timeout:
+                print(f"[submit_cloud] Timeout dépassé, stop du pod")
+                provider.stop(handle)
+                raise RuntimeError(f"Timeout après {elapsed}s")
+            
+            time.sleep(10)
+        
+        duration = time.time() - start
+        print(f"[submit_cloud] Job terminé : {last_status.value}")
+        print(f"[submit_cloud] Durée      : {duration:.1f}s")
+    
     except Exception as e:
         print(f"[submit_cloud] Erreur wait : {e}")
         print(f"[submit_cloud] Tentative de stop du pod...")
@@ -236,12 +265,7 @@ def cmd_submit_cloud(args, config: dict):
             print(f"[submit_cloud] Stop échec : {stop_err}")
         raise
     
-    print(f"[submit_cloud] Job terminé : {result.status}")
-    print(f"[submit_cloud] Durée      : {result.duration_seconds:.1f}s")
-    print(f"[submit_cloud] Logs       :")
-    print(result.logs)
-    
-    return result
+    return last_status
 
 def main():
     parser = argparse.ArgumentParser(description="MLOps experiment runner")
@@ -272,7 +296,7 @@ def main():
     parser.add_argument(
     "--gpu-types",
     nargs="+",
-    default=["rtx_4090", "rtx_3090", "rtx_a4000", "a100_40gb"],
+    default=["rtx_4090", "rtx_3090", "rtx_4080", "rtx_a5000", "rtx_a6000","rtx_a4000", "a40", "l40", "l40s", "a100_40gb"],
     help="(submit_cloud) Liste de GPUs à essayer en cascade (du préféré au fallback)",
 )
     parser.add_argument(
