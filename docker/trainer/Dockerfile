@@ -19,12 +19,12 @@ ENV PYTHONUNBUFFERED=1 \
 # curl, ca-certificates : pour télécharger des binaires
 # build-essential : nécessaire pour certaines deps Python compilées
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    curl \
-    ca-certificates \
-    build-essential \
+        git curl ca-certificates build-essential iptables iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
+RUN curl -fsSL https://tailscale.com/install.sh | sh \
+    && mkdir -p /var/lib/tailscale /var/run/tailscale \
+    && tailscale --version
 # === Workspace ===
 WORKDIR /workspace
 
@@ -39,6 +39,7 @@ RUN pip install --no-cache-dir -v -r requirements.txt
 # === Code applicatif ===
 # Copié après les deps pour minimiser les rebuilds quand seul le code change.
 COPY src/ /workspace/src/
+COPY scripts/ /workspace/scripts/
 COPY .dvc/config /workspace/.dvc/config
 # === Fichiers dvc ===
 COPY data/ /workspace/data/
@@ -52,6 +53,7 @@ RUN chmod +x /workspace/entrypoint.sh
 RUN python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}')" \
     && python -c "import sentence_transformers, lightgbm, polars, mlflow, dvc" \
     && python -c "import src.experiments.runner; print('src package OK')" \
+    && tailscale --version \
     && echo "Image trainer OK"
 
 ENTRYPOINT ["/workspace/entrypoint.sh"]
