@@ -41,6 +41,8 @@ from src.experiments.datamodule.tabular_features import (
 )
 from src.features.utils import clean_description  # legacy, à refondre en Bloc F
 
+from dotenv import load_dotenv
+load_dotenv()
 
 # Constantes Mongo et chemins data
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
@@ -74,10 +76,11 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         cache_version: int = 1,
         batch_size: int = 64,
         num_workers: int = 4,
-        val_size: float = 0.20,
-        test_size: float = 0.10,
+        val_size: float = 0.10,
         random_state: int = 42,
         limit: int | None = None,
+        train_batches: list[int] = (1, 2, 3),
+        exclude_gold: bool = True,
     ):
         super().__init__()
         self.mode = mode
@@ -87,9 +90,10 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.val_size = val_size
-        self.test_size = test_size
         self.random_state = random_state
-        self.limit = limit 
+        self.limit = limit
+        self.train_batches = list(train_batches)
+        self.exclude_gold = exclude_gold
 
         # Chemin du cache, déterministe à partir des modèles + version
         self.cache_path = CACHE_DIR / (
@@ -99,9 +103,9 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
 
         # Placeholders remplis dans setup()
         self._df_full: pl.DataFrame | None = None
+        self._df_train_pool: pl.DataFrame | None = None
         self._df_train: pl.DataFrame | None = None
         self._df_val: pl.DataFrame | None = None
-        self._df_test: pl.DataFrame | None = None
         self._text_cols: list[str] | None = None
         self._image_cols: list[str] | None = None
         self._tabular_cols: list[str] | None = None
@@ -122,9 +126,9 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         db = client[DB_NAME]
 
         # 1. Récupérer tous les productid en base (X et label)
-        
+
         cursor  = db["X_raw_data_batches"].find(
-            {}, {"_id": 0, "productid": 1, "imageid": 1, "designation": 1, "description": 1}
+            {}, {"_id": 0, "productid": 1, "imageid": 1, "designation": 1, "description": 1, "batch_id": 1, "is_gold": 1}
         )
         if self.limit is not None:
             cursor = cursor.limit(self.limit)
@@ -174,6 +178,8 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         labels_ordered = []
         text_tab_records = []
         image_tab_records = []
+        batch_ids_ordered = []
+        is_gold_ordered = []
 
         for d in docs_to_process:
             pid = d["productid"]
@@ -192,6 +198,8 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             productids_ordered.append(pid)
             imageids_ordered.append(iid)
             labels_ordered.append(labels_map[pid])
+            batch_ids_ordered.append(d.get("batch_id"))
+            is_gold_ordered.append(d.get("is_gold", False))
 
             # Tabulaires extraits dans la même boucle (texte = quasi-instantané,
             # image = ~1ms par sample, négligeable)
@@ -212,6 +220,8 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             "productid": productids_ordered,
             "imageid": imageids_ordered,
             "label": labels_ordered,
+            "batch_id": batch_ids_ordered,
+            "is_gold": is_gold_ordered,
         }
         for i in range(text_emb.shape[1]):
             new_data[f"text_feat_{i}"] = text_emb[:, i].tolist()
@@ -238,8 +248,14 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
 
     def setup(self, stage: str | None = None):
         """
-        Charge le cache et fait le split train/val/test stratifié sur le label.
-        Le split est fait AVANT toute opération preprocessing (anti-fuite).
+        Charge le cache, applique les filtres (batches autorisés, gold exclu),
+        et expose train_pool + ensembles d'évaluation (gold, shadow batches).
+
+        Migration douce : si le cache parquet n'a pas batch_id/is_gold, on les
+        rapatrie depuis Mongo (one-shot, écrit dans le parquet pour les runs suivants).
+
+        Le split train/val interne (pour early stopping en M3, par exemple) est
+        un split 90/10 du train_pool, utilisé par les DataLoaders Lightning.
         """
         if self.mode != "m2_embeddings":
             raise NotImplementedError(f"setup pour mode={self.mode} non encore supporté")
@@ -250,6 +266,32 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             )
 
         df = pl.read_parquet(self.cache_path)
+
+        # Migration douce : si batch_id ou is_gold manquent, on les rapatrie depuis Mongo
+        missing_cols = [c for c in ("batch_id", "is_gold") if c not in df.columns]
+        if missing_cols:
+            print(f"[DataModule] Cache sans {missing_cols}, migration auto depuis Mongo...")
+            client = MongoClient(MONGO_URI)
+            db = client[DB_NAME]
+            pid_list = df.get_column("productid").to_list()
+            mongo_docs = db["X_raw_data_batches"].find(
+                {"productid": {"$in": pid_list}},
+                {"_id": 0, "productid": 1, "batch_id": 1, "is_gold": 1},
+            )
+            mapping = {d["productid"]: d for d in mongo_docs}
+            new_cols = []
+            if "batch_id" in missing_cols:
+                new_cols.append(
+                    pl.Series("batch_id", [mapping.get(pid, {}).get("batch_id") for pid in pid_list])
+                )
+            if "is_gold" in missing_cols:
+                new_cols.append(
+                    pl.Series("is_gold", [mapping.get(pid, {}).get("is_gold", False) for pid in pid_list])
+                )
+            df = df.with_columns(new_cols)
+            df.write_parquet(self.cache_path)
+            print(f"[DataModule] Cache enrichi : {self.cache_path}")
+
         mapping_path = self.cache_path.with_suffix(".labels.json")
         if mapping_path.exists():
             data = json.loads(mapping_path.read_text())
@@ -262,34 +304,38 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self._text_cols = [c for c in df.columns if c.startswith("text_feat_")]
         self._image_cols = [c for c in df.columns if c.startswith("image_feat_")]
         self._tabular_cols = [c for c in df.columns if c.startswith("tab_")]
-
-        labels = df.get_column("label").to_numpy()
-        indices = np.arange(len(df))
-
-        # Split stratifié à 3 (train, val, test).
-        # On ajuste la fraction val pour avoir test_size + val_size du TOTAL.
-        idx_trainval, idx_test = train_test_split(
-            indices,
-            test_size=self.test_size,
-            stratify=labels,
-            random_state=self.random_state,
-        )
-        labels_trainval = labels[idx_trainval]
-        idx_train, idx_val = train_test_split(
-            idx_trainval,
-            test_size=self.val_size / (1 - self.test_size),
-            stratify=labels_trainval,
-            random_state=self.random_state,
-        )
-
         self._df_full = df
-        self._df_train = df[idx_train.tolist()]
-        self._df_val = df[idx_val.tolist()]
-        self._df_test = df[idx_test.tolist()]
 
+        # Train pool : batches autorisés AND not gold (ceinture + bretelles)
+        mask_pool = pl.col("batch_id").is_in(self.train_batches)
+        if self.exclude_gold:
+            mask_pool = mask_pool & (~pl.col("is_gold"))
+        self._df_train_pool = df.filter(mask_pool)
+
+        n_total = df.height
+        n_pool = self._df_train_pool.height
+        n_gold = df.filter(pl.col("is_gold")).height
+        n_shadow = n_total - n_pool - n_gold
         print(
-            f"[DataModule] Split : train={len(self._df_train)}, "
-            f"val={len(self._df_val)}, test={len(self._df_test)}"
+            f"[DataModule] Total={n_total} | train_pool={n_pool} "
+            f"(batches={self.train_batches}, gold_excluded={self.exclude_gold}) | "
+            f"gold={n_gold} | shadow={n_shadow}"
+        )
+
+        # Split train/val interne sur le pool (pour DataLoaders Lightning M3+)
+        labels_pool = self._df_train_pool.get_column("label").to_numpy()
+        indices_pool = np.arange(n_pool)
+        idx_train, idx_val = train_test_split(
+            indices_pool,
+            test_size=self.val_size,
+            stratify=labels_pool,
+            random_state=self.random_state,
+        )
+        self._df_train = self._df_train_pool[idx_train.tolist()]
+        self._df_val = self._df_train_pool[idx_val.tolist()]
+        print(
+            f"[DataModule] Split du train_pool : train={len(self._df_train)}, "
+            f"val={len(self._df_val)} (val_size={self.val_size})"
         )
 
     # --- Interface Lightning (DataLoaders pour M3/M4) ---------------------
@@ -311,26 +357,89 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         return self._make_loader(self._df_val, shuffle=False)
 
     def test_dataloader(self) -> DataLoader:
-        return self._make_loader(self._df_test, shuffle=False)
+        raise NotImplementedError(
+            "Pas de test_dataloader local : utilise get_eval_data('gold') ou "
+            "get_eval_data('shadow', batch_id=N) selon ton besoin d'évaluation."
+        )
 
-    # --- Interface sklearn (DataFrames bruts pour M2) ---------------------
-
+    # --- Interface principale (M2 sklearn + évaluations) ------------------
     def get_sklearn_data(
-        self, split: Literal["train", "val", "test"]
+        self, split: Literal["train", "val"]
     ) -> tuple[pl.DataFrame, np.ndarray]:
         """
-        Retourne (X, y) pour usage sklearn-style (M2Stacking).
-        X est le DataFrame Polars avec embeddings texte + image + tabulaires.
-        y est un numpy array de labels.
-        """
-        if self.mode != "m2_embeddings":
-            raise ValueError("get_sklearn_data est uniquement pour mode='m2_embeddings'")
+        Retourne (X, y) du split interne 90/10 du train_pool.
 
-        df_map = {"train": self._df_train, "val": self._df_val, "test": self._df_test}
-        df = df_map[split]
+        - "train" : 90% du pool, utilisé pour fit (en M2 le K-Fold consomme ça)
+        - "val" : 10% du pool, utilisé pour diagnostics post-fit (calibration,
+                  confusion, stacking analysis). Ce n'est PAS du test métier.
+
+        Pour le test métier (gold) ou observer la généralisation à des données
+        futures (shadow batches), utiliser get_eval_data().
+        """
+        if self._df_train is None or self._df_val is None:
+            raise RuntimeError("setup() doit être appelé avant get_sklearn_data()")
+
+        df_map = {"train": self._df_train, "val": self._df_val}
+        if split not in df_map:
+            raise ValueError(
+                f"split={split} non supporté. Utiliser 'train' ou 'val' pour le "
+                "split interne du pool, ou get_eval_data('gold'/'shadow') pour "
+                "l'évaluation métier."
+            )
+
         feat_cols = self._text_cols + self._image_cols + self._tabular_cols
-        X = df.select(feat_cols)
-        y = df.get_column("label").to_numpy()
+        X = df_map[split].select(feat_cols)
+        y = df_map[split].get_column("label").to_numpy()
+        return X, y
+    
+    def get_train_pool(self) -> tuple[pl.DataFrame, np.ndarray]:
+        """
+        Retourne (X, y) du pool d'entraînement : batches autorisés, gold exclu.
+        Chaque algo gère son propre split interne (K-Fold pour M2, train/val pour M3).
+        """
+        if self._df_train_pool is None:
+            raise RuntimeError("setup() doit être appelé avant get_train_pool()")
+        feat_cols = self._text_cols + self._image_cols + self._tabular_cols
+        X = self._df_train_pool.select(feat_cols)
+        y = self._df_train_pool.get_column("label").to_numpy()
+        return X, y
+
+    def get_eval_data(
+        self,
+        kind: Literal["gold", "shadow"],
+        batch_id: int | None = None,
+    ) -> tuple[pl.DataFrame, np.ndarray]:
+        """
+        Retourne (X, y) pour évaluation.
+        - "gold" : test set transverse (arbitre @champion)
+        - "shadow" : batch hors train_batches (simule nouvelles données arrivées)
+        """
+        if self._df_full is None:
+            raise RuntimeError("setup() doit être appelé avant get_eval_data()")
+
+        if kind == "gold":
+            df_eval = self._df_full.filter(pl.col("is_gold"))
+        elif kind == "shadow":
+            if batch_id is None:
+                raise ValueError("batch_id requis pour kind='shadow'")
+            if batch_id in self.train_batches:
+                raise ValueError(
+                    f"batch_id={batch_id} est dans train_batches={self.train_batches}, "
+                    "pas un shadow batch valide"
+                )
+            df_eval = self._df_full.filter(
+                (~pl.col("is_gold")) & (pl.col("batch_id") == batch_id)
+            )
+        else:
+            raise ValueError(f"kind doit être 'gold' ou 'shadow', pas '{kind}'")
+
+        if df_eval.height == 0:
+            raise ValueError(f"Ensemble eval ({kind}, batch_id={batch_id}) vide")
+
+        feat_cols = self._text_cols + self._image_cols + self._tabular_cols
+        X = df_eval.select(feat_cols)
+        y = df_eval.get_column("label").to_numpy()
+        print(f"[DataModule] get_eval_data({kind}, batch_id={batch_id}) : n={len(y)}")
         return X, y
 
     # --- Properties pour exposer les listes de colonnes -------------------
@@ -346,7 +455,19 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
     @property
     def tabular_cols(self) -> list[str]:
         return self._tabular_cols
-    
+
     @property
     def idx_to_code(self) -> dict[int, int]:
         return self._idx_to_code
+
+    @property
+    def all_batch_ids(self) -> list[int]:
+        """
+        Liste des batch_id uniques (non-null) présents dans le dataset.
+        Permet de dériver dynamiquement les shadow batches : all_batch_ids - train_batches.
+        """
+        if self._df_full is None:
+            raise RuntimeError("setup() doit être appelé avant all_batch_ids")
+        return sorted(
+            self._df_full.get_column("batch_id").drop_nulls().unique().to_list()
+        )

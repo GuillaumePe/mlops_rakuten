@@ -320,3 +320,117 @@ def get_f1_score_from_model_uri(model_uri: str, metric_name: str = "f1_score") -
 
     except Exception as e:
         raise RuntimeError(f"Erreur lors de la récupération du f1-score depuis {model_uri} : {e}")
+
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass
+class PromotionResult:
+    """Résultat de l'évaluation de promotion @champion."""
+    promoted: bool
+    reason: str
+    model_name: str
+    candidate_version: str
+    candidate_score: float
+    champion_version: Optional[str] = None
+    champion_score: Optional[float] = None
+    gain: Optional[float] = None
+    epsilon: float = 0.0
+
+    def __str__(self) -> str:
+        head = "✓ PROMOTED" if self.promoted else "✗ NOT PROMOTED"
+        out = f"{head} : {self.model_name} v{self.candidate_version}"
+        out += f"\n  reason: {self.reason}"
+        out += f"\n  candidate_score: {self.candidate_score:.4f}"
+        if self.champion_score is not None:
+            out += f"\n  champion_score: {self.champion_score:.4f} (v{self.champion_version})"
+            out += f"\n  gain: {self.gain:+.4f} (threshold: {self.epsilon:+.4f})"
+        return out
+
+
+def evaluate_promotion_via_logged_metrics(
+    model_name: str,
+    candidate_version: str,
+    metric_key: str = "eval_gold/f1_weighted",
+    epsilon: float = 0.005,
+) -> PromotionResult:
+    """
+    Compare un candidat au champion actuel via les métriques MLflow déjà loggées
+    (pas de prédiction live).
+
+    Logique :
+    - Pas de champion existant → promotion automatique comme baseline
+    - Champion existe → promotion si (candidate - champion) >= epsilon
+
+    Note statistique : avec n_gold ≈ 8500 et F1 ≈ 0.85, σ_F1 ≈ 0.004.
+    Un epsilon = 0.005 ≈ 1.3σ correspond à ~90% de confiance unilatérale.
+    Pour 95% de confiance unilatérale, prendre epsilon = 0.007.
+
+    Args:
+        model_name: nom du modèle dans le registry
+        candidate_version: version du candidat fraîchement enregistrée
+        metric_key: clé MLflow de la métrique de comparaison
+        epsilon: seuil de gain minimal pour promotion
+
+    Returns:
+        PromotionResult avec décision et justification (et exécution de la promotion si applicable).
+    """
+    import mlflow
+    client = mlflow.tracking.MlflowClient()
+
+    # 1. Score du candidat (lit la métrique loggée pendant le fit)
+    candidate_mv = client.get_model_version(model_name, candidate_version)
+    candidate_run = client.get_run(candidate_mv.run_id)
+    candidate_score = candidate_run.data.metrics.get(metric_key)
+    if candidate_score is None:
+        raise ValueError(
+            f"Candidate v{candidate_version} n'a pas la métrique '{metric_key}'. "
+            "Vérifier que _log_eval_matrix() est bien appelé pendant le fit."
+        )
+
+    # 2. Score du champion actuel (s'il existe)
+    try:
+        champion_uri = f"models:/{model_name}@champion"
+        champion_score = get_f1_score_from_model_uri(champion_uri, metric_name=metric_key)
+        champion_mv = client.get_model_version_by_alias(model_name, "champion")
+        champion_version = champion_mv.version
+    except (mlflow.exceptions.RestException, RuntimeError):
+        # Pas de champion : promotion automatique
+        promotion_exclusive_best_model_to_production(model_name, candidate_version)
+        return PromotionResult(
+            promoted=True,
+            reason="first_champion (no previous champion in registry)",
+            model_name=model_name,
+            candidate_version=candidate_version,
+            candidate_score=candidate_score,
+            epsilon=epsilon,
+        )
+
+    # 3. Comparaison avec seuil ε
+    gain = candidate_score - champion_score
+    if gain >= epsilon:
+        promotion_exclusive_best_model_to_production(model_name, candidate_version)
+        return PromotionResult(
+            promoted=True,
+            reason=f"gain {gain:+.4f} >= epsilon {epsilon:+.4f} (significant)",
+            model_name=model_name,
+            candidate_version=candidate_version,
+            candidate_score=candidate_score,
+            champion_version=champion_version,
+            champion_score=champion_score,
+            gain=gain,
+            epsilon=epsilon,
+        )
+    else:
+        return PromotionResult(
+            promoted=False,
+            reason=f"gain {gain:+.4f} < epsilon {epsilon:+.4f} (not significant)",
+            model_name=model_name,
+            candidate_version=candidate_version,
+            candidate_score=candidate_score,
+            champion_version=champion_version,
+            champion_score=champion_score,
+            gain=gain,
+            epsilon=epsilon,
+        )

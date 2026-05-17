@@ -14,6 +14,7 @@ Le runner :
 """
 from __future__ import annotations
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
@@ -40,6 +41,36 @@ def load_config(experiment_name: str) -> dict:
     with open(config_path) as f:
         return yaml.safe_load(f)
 
+def get_local_tailscale_ip() -> str:
+    """
+    Récupère l'IP Tailscale (100.x.x.x) de la machine locale.
+    Utilisée pour construire automatiquement MLFLOW_TRACKING_URI vu côté pod
+    quand on submit un job cloud sans URI explicite.
+
+    Raises:
+        RuntimeError: si `tailscale` n'est pas installé ou pas connecté au tailnet.
+    """
+    try:
+        output = subprocess.check_output(
+            ["tailscale", "ip", "-4"], text=True, timeout=5
+        ).strip()
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            "`tailscale` introuvable. Installe-le et lance `sudo tailscale up`."
+        ) from e
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"`tailscale ip -4` a échoué (code={e.returncode}). "
+            f"Vérifie que tu es connecté au tailnet (`tailscale status`)."
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError("`tailscale ip -4` a timeout (>5s).") from e
+
+    # Une machine peut avoir plusieurs IPs Tailscale (rare); on prend la première
+    ip = output.split("\n")[0].strip()
+    if not ip.startswith("100."):
+        raise RuntimeError(f"IP Tailscale inattendue : '{ip}' (devrait commencer par 100.)")
+    return ip
 
 def build_m2_experiment(config: dict) -> tuple[RakutenLightningDataModule, SklearnExperiment]:
     """Assemble DataModule + M2Stacking + SklearnExperiment depuis une config M2."""
@@ -51,17 +82,15 @@ def build_m2_experiment(config: dict) -> tuple[RakutenLightningDataModule, Sklea
         cache_version=dm_cfg.get("cache_version", 1),
         batch_size=dm_cfg.get("batch_size", 64),
         num_workers=dm_cfg.get("num_workers", 4),
-        val_size=dm_cfg.get("val_size", 0.15),
-        test_size=dm_cfg.get("test_size", 0.15),
+        val_size=dm_cfg.get("val_size", 0.10),
         random_state=dm_cfg.get("random_state", 42),
         limit=config.get("limit"),
+        train_batches=dm_cfg.get("train_batches", [1, 2, 3]),
+        exclude_gold=dm_cfg.get("exclude_gold", True),
     )
 
     model_cfg = config["model"]
-
     def m2_factory(_optuna_callback_unused):
-        # Le callback n'est plus utilisé (logging direct dans l'objective)
-        # mais SklearnExperiment l'expose pour compat ABC future
         return M2Stacking(
             text_cols=dm.text_cols,
             image_cols=dm.image_cols,
@@ -73,12 +102,20 @@ def build_m2_experiment(config: dict) -> tuple[RakutenLightningDataModule, Sklea
             n_jobs_optuna=model_cfg.get("n_jobs_optuna", 4),
         )
 
+    # Fusion des tags YAML + tags promotion (étape 5)
+    promotion_cfg = config.get("promotion", {})
+    yaml_tags = config["mlflow"].get("tags", {})
+    combined_tags = {
+        **yaml_tags,
+        "registry_model_name": promotion_cfg.get("registry_model_name", "rakuten-m2-stacking"),
+        "promotion_epsilon": str(promotion_cfg.get("epsilon", 0.005)),
+    }
+
     experiment = SklearnExperiment(
         model_factory=m2_factory,
         run_name=config["mlflow"]["run_name"],
-        tags=config["mlflow"].get("tags", {}),
+        tags=combined_tags,
     )
-
     return dm, experiment
 
 
@@ -116,6 +153,55 @@ def cmd_evaluate(dm: RakutenLightningDataModule, experiment: SklearnExperiment):
     print(f"[Runner] Résultats sur test : {results}")
     return results
 
+def cmd_smoke_tailscale():
+    """
+    Smoke test : valide la chaîne pod → Tailscale → MLflow local.
+
+    Log un run minimal dans l'experiment '_smoke_tailscale' avec un param,
+    une metric, et un artefact. Si tout apparaît dans l'UI MLflow locale,
+    la chaîne complète est opérationnelle (incluant les uploads multipart).
+
+    Cette action est destinée à tourner sur le pod cloud (--cloud-action smoke_tailscale).
+    """
+    import socket
+    import tempfile
+
+    print(f"[smoke] Hostname pod   : {socket.gethostname()}")
+    print(f"[smoke] MLFLOW_TRACKING_URI : {os.environ.get('MLFLOW_TRACKING_URI', '<not set>')}")
+
+    if not os.environ.get("MLFLOW_TRACKING_URI"):
+        raise RuntimeError("MLFLOW_TRACKING_URI non défini, impossible de smoke-tester MLflow")
+
+    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+    mlflow.set_experiment("_smoke_tailscale")
+
+    with mlflow.start_run(run_name=f"smoke_{socket.gethostname()}") as run:
+        print(f"[smoke] Run ID : {run.info.run_id}")
+        mlflow.log_param("hostname", socket.gethostname())
+        mlflow.log_param("pod_id", os.environ.get("RUNPOD_POD_ID", "unknown"))
+        mlflow.log_metric("test_metric", 42.0)
+
+        # Test d'upload d'artefact (chemin critique : exerce le multipart upload HTTP
+        # qui peut échouer sur certains tunnels même quand /health répond)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write(f"smoke test from {socket.gethostname()}\n")
+            artifact_path = f.name
+        mlflow.log_artifact(artifact_path)
+        os.unlink(artifact_path)
+
+        print("[smoke] OK : run + param + metric + artifact loggés")
+
+def cmd_fetch_logs(args):
+    """Récupère les logs d'un pod cloud depuis R2."""
+    import subprocess
+    print("[fetch_logs] Logs disponibles sur R2 :")
+    subprocess.run([sys.executable, "scripts/r2_logs.py", "list"], check=True)
+    if args.job_id:
+        # Cherche le log le plus récent contenant le job_id
+        # (le job_id RunPod ≠ pod_id mais souvent corrélés, donc on liste et l'user choisit)
+        print(f"\n[fetch_logs] Pour télécharger un log, lance :")
+        print(f"    python scripts/r2_logs.py download <key_au_dessus> /tmp/<key>")
+
 def cmd_submit_cloud(args, config: dict):
     """
     Soumet un job au provider cloud avec fallback sur la liste de GPUs.
@@ -146,19 +232,46 @@ def cmd_submit_cloud(args, config: dict):
     ]
     if args.limit is not None:
         pod_command += ["--limit", str(args.limit)]
-    if args.mlflow_tracking_uri:
-        pod_command += ["--mlflow-tracking-uri", args.mlflow_tracking_uri]
     
+    # Résolution MLflow tracking URI :
+    # - Si fourni explicitement (CLI ou env) ET hors localhost : on garde tel quel
+    # - Sinon : auto-construction depuis l'IP Tailscale locale (cas standard)
+    mlflow_uri_override = args.mlflow_tracking_uri or os.getenv("MLFLOW_TRACKING_URI", "")
+    local_hosts = ("localhost", "127.0.0.1", "mlflow:5000")
+    if mlflow_uri_override and not any(h in mlflow_uri_override for h in local_hosts):
+        mlflow_uri_for_pod = mlflow_uri_override
+        print(f"[submit_cloud] MLflow URI explicite : {mlflow_uri_for_pod}")
+    else:
+        ts_ip = get_local_tailscale_ip()
+        mlflow_uri_for_pod = f"http://{ts_ip}:5000"
+        print(f"[submit_cloud] MLflow URI auto via Tailscale : {mlflow_uri_for_pod}")
+    
+    # Tailscale auth key : obligatoire pour le pod
+    tailscale_authkey = os.getenv("TAILSCALE_AUTHKEY", "")
+    if not tailscale_authkey:
+        raise RuntimeError(
+            "TAILSCALE_AUTHKEY manquante dans .env. "
+            "Génère une auth key pod (reusable=true, ephemeral=true) dans le dashboard Tailscale."
+        )
+
+    # On passe toujours l'URI résolu au pod, qu'il ait été fourni explicitement ou auto
+    # (utile pour les actions qui lisent args.mlflow_tracking_uri côté pod)
+    pod_command += ["--mlflow-tracking-uri", mlflow_uri_for_pod]
     # Env vars critiques à passer au pod
     pod_env = {
         # R2 (DVC remote)
         "R2_ACCESS_KEY_ID": os.getenv("R2_ACCESS_KEY_ID", ""),
         "R2_SECRET_ACCESS_KEY": os.getenv("R2_SECRET_ACCESS_KEY", ""),
+        # Pour l'upload des logs vers R2
+        "R2_ENDPOINT_URL": os.getenv("R2_ENDPOINT_URL", ""),
+        "R2_BUCKET_NAME": os.getenv("R2_BUCKET_NAME", "rakuten-mlops-dvc"),
         # MongoDB Atlas
         "MONGO_URI": os.getenv("MONGO_URI", ""),
         "MONGO_DB_NAME": os.getenv("MONGO_DB_NAME", "MAR25_CMLOPS_RAKUTEN"),
+        # Tailscale (overlay network vers MLflow local)
+        "TAILSCALE_AUTHKEY": tailscale_authkey,
         # MLflow
-        "MLFLOW_TRACKING_URI": args.mlflow_tracking_uri or os.getenv("MLFLOW_TRACKING_URI", ""),
+        "MLFLOW_TRACKING_URI": mlflow_uri_for_pod,
         # Self-terminate
         "RUNPOD_API_KEY": os.getenv("RUNPOD_API_KEY", ""),
         # DATA_ROOT pour les paths
@@ -195,6 +308,18 @@ def cmd_submit_cloud(args, config: dict):
     print(f"[submit_cloud] Image      : {image}")
     print(f"[submit_cloud] GPUs cibles : {args.gpu_types}")
     print(f"[submit_cloud] Commande   : {' '.join(pod_command)}")
+    # Timeout adaptatif par action si pas explicitement override en CLI
+    TIMEOUT_BY_ACTION = {
+        "smoke_tailscale": 300,
+        "prepare_data": 3600,
+        "fit": 7200,
+        "promote": 600,
+    }
+    DEFAULT_TIMEOUT = 3600  # le défaut du parser CLI
+    if args.cloud_timeout == DEFAULT_TIMEOUT:
+        # Pas overridé par l'utilisateur → on prend le défaut spécifique à l'action
+        args.cloud_timeout = TIMEOUT_BY_ACTION.get(args.cloud_action, DEFAULT_TIMEOUT)
+        print(f"[submit_cloud] Timeout auto pour action '{args.cloud_action}' : {args.cloud_timeout}s")
     print(f"[submit_cloud] Timeout    : {args.cloud_timeout}s")
     
     # Submit avec fallback sur la liste de GPUs
@@ -275,7 +400,7 @@ def main():
     )
     parser.add_argument(
         "--action", required=True,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "submit_cloud"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "submit_cloud", "smoke_tailscale","fetch_logs"],
         help="Action à exécuter",
     )
     parser.add_argument(
@@ -290,14 +415,14 @@ def main():
     parser.add_argument(
         "--cloud-action",
         default=None,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale"],
         help="(submit_cloud only) Quelle action le pod cloud doit exécuter",
     )
     parser.add_argument(
-    "--gpu-types",
-    nargs="+",
-    default=["rtx_4090", "rtx_3090", "rtx_4080", "rtx_a5000", "rtx_a6000","rtx_a4000", "a40", "l40", "l40s", "a100_40gb"],
-    help="(submit_cloud) Liste de GPUs à essayer en cascade (du préféré au fallback)",
+        "--gpu-types",
+        nargs="+",
+        default=["rtx_4090", "rtx_3090", "rtx_4080", "rtx_a5000", "rtx_a6000","rtx_a4000", "a40", "l40", "l40s", "a100_40gb","rtx_pro_4500"],
+        help="(submit_cloud) Liste de GPUs à essayer en cascade (du préféré au fallback)",
 )
     parser.add_argument(
         "--cloud-image",
@@ -312,10 +437,16 @@ def main():
     )
     parser.add_argument(
     "--cloud-dvc-targets",
-    nargs="+",
-    default=None,
-    help="(submit_cloud) Liste des .dvc à puller. Défaut : X_train + Y_train + images.",
+        nargs="+",
+        default=None,
+        help="(submit_cloud) Liste des .dvc à puller. Défaut : X_train + Y_train + images.",
     )
+    parser.add_argument(
+        "--job-id",
+        default=None,
+        help="(fetch_logs only) Job ID RunPod du pod dont on veut les logs",
+    )
+    
     args = parser.parse_args()
 
     # Charger la config
@@ -336,6 +467,11 @@ def main():
     if args.action == "submit_cloud":
         # Pas d'init MLflow local : le tracking se fera côté pod
         cmd_submit_cloud(args, config)
+        return
+
+    # smoke_tailscale : test de bout en bout sans construire DataModule/Experiment
+    if args.action == "smoke_tailscale":
+        cmd_smoke_tailscale()
         return
 
     # Init MLflow seulement pour les actions qui en ont besoin

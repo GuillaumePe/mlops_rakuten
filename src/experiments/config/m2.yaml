@@ -1,5 +1,4 @@
 # Configuration M2 — stacking multimodal sur embeddings frozen
-
 datamodule:
   mode: m2_embeddings
   text_model: dangvantuan/sentence-camembert-base
@@ -7,9 +6,10 @@ datamodule:
   cache_version: 1
   batch_size: 64
   num_workers: 4
-  val_size: 0.15
-  test_size: 0.15
+  val_size: 0.10
   random_state: 42
+  train_batches: [1]
+  exclude_gold: true
 
 model:
   n_classes: 27
@@ -27,3 +27,8 @@ mlflow:
     base_text: camembert
     base_image: resnet18
     architecture: stacking_logreg_lgbm
+    exp_id: exp_iid_baseline
+
+promotion:
+  registry_model_name: "rakuten-m2-stacking"
+  epsilon: 0.005

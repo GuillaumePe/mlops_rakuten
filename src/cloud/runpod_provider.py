@@ -43,6 +43,8 @@ RUNPOD_GPU_MAP = {
     "a40": "NVIDIA A40",
     "a100_40gb": "NVIDIA A100-SXM4-40GB",
     "a100_80gb": "NVIDIA A100 80GB PCIe",
+    "rtx_pro_4500": "NVIDIA RTX PRO 4500 Blackwell",
+    "rtx_pro_6000_wk": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
 }
 
 

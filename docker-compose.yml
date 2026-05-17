@@ -233,7 +233,7 @@ services:
       "--default-artifact-root=/mlflow/mlruns",
       "--host", "0.0.0.0",
       "--port", "5000",
-      "--gunicorn-opts=--timeout=3600"]
+      "--allowed-hosts", "localhost:*,127.0.0.1:*,mlflow:*,${IP_Tailscale:-100.126.74.73}:*"]
     ports:
       - "5000:5000"
     volumes:
