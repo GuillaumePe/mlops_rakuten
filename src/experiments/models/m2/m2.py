@@ -23,7 +23,21 @@ Stratégie d'entraînement :
 
 Au predict : f_text_final.predict_proba + f_image_final.predict_proba + tabular
 → concat → g.predict
+deprecated:: Phase 1
+    M2Stacking est remplacé par M2Baseline dans src/models/assembled/m2_baseline.py.
+    Cette classe est conservée pour rollback rapide pendant la transition
+    Phase 1 et sera supprimée en fin de Phase 1 (Bloc R).
+    
+    Migration : utiliser `--experiment m2_baseline` au lieu de `--experiment m2`.
 """
+import warnings
+warnings.warn(
+    "M2Stacking is deprecated and will be removed in Phase 1 end. "
+    "Use src.models.assembled.m2_baseline.M2Baseline instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 from __future__ import annotations
 from typing import Optional
 
