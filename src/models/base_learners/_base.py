@@ -22,7 +22,6 @@ Stratégie de fit pour les deep base learners :
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -153,31 +152,7 @@ class BaseLearner(ABC):
             "Utiliser extract_embeddings + un classifier externe (LogReg)."
         )
 
-    # ------------------------------------------------------------------ #
-    # Persistance (à surcharger ou utiliser pickle par défaut)            #
-    # ------------------------------------------------------------------ #
-
-    @abstractmethod
-    def save(self, path: str | Path) -> None:
-        """
-        Sérialise l'état du learner sur disque.
-
-        Doit sauvegarder :
-        - Poids du modèle (deep) ou pipeline sklearn fitté
-        - Tokenizers, vocabulaires, transforms si applicable
-        - Métadonnées suffisantes pour load() sans paramètres externes
-        """
-
-    @abstractmethod
-    def load(self, path: str | Path) -> "BaseLearner":
-        """
-        Charge l'état depuis disque. Retourne self.
-
-        Doit être l'inverse exact de save() : après load(), le learner doit
-        être dans le même état qu'après fit() initial (extract_embeddings
-        produit les mêmes valeurs).
-        """
-
+    
     # ------------------------------------------------------------------ #
     # Utilitaires                                                         #
     # ------------------------------------------------------------------ #

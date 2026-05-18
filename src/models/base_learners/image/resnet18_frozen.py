@@ -81,19 +81,4 @@ class ResNet18Frozen(BaseLearner):
                 )
         return X.select(self.cols).to_numpy().astype(np.float32)
 
-    def save(self, path: str | Path) -> None:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            f"name={self.name}\n"
-            f"embed_dim={self._embed_dim}\n"
-            f"col_prefix={self.col_prefix}\n"
-            f"fitted={self._fitted}\n"
-        )
-
-    def load(self, path: str | Path) -> "ResNet18Frozen":
-        content = dict(line.split("=") for line in Path(path).read_text().splitlines() if "=" in line)
-        self._embed_dim = int(content["embed_dim"])
-        self.col_prefix = content["col_prefix"]
-        self._fitted = content["fitted"].strip() == "True"
-        return self
+ 
