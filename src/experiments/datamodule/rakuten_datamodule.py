@@ -215,13 +215,14 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         image_encoder = ImageEncoder(self.image_model)
         image_emb = image_encoder.encode(image_paths, batch_size=64, num_workers=self.num_workers)
 
-        # 7. Assembler en DataFrame Polars : ids + label + embeddings + tabulaires
+        # 7. Assembler en DataFrame Polars : ids + label + embeddings + tabulaires + text
         new_data = {
             "productid": productids_ordered,
             "imageid": imageids_ordered,
             "label": labels_ordered,
             "batch_id": batch_ids_ordered,
             "is_gold": is_gold_ordered,
+            "text": texts,  # texte nettoyé (déjà passé par clean_description plus haut)
         }
         for i in range(text_emb.shape[1]):
             new_data[f"text_feat_{i}"] = text_emb[:, i].tolist()
@@ -268,15 +269,23 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         df = pl.read_parquet(self.cache_path)
 
         # Migration douce : si batch_id ou is_gold manquent, on les rapatrie depuis Mongo
-        missing_cols = [c for c in ("batch_id", "is_gold") if c not in df.columns]
+        missing_cols = [c for c in ("batch_id", "is_gold", "text") if c not in df.columns]
         if missing_cols:
             print(f"[DataModule] Cache sans {missing_cols}, migration auto depuis Mongo...")
             client = MongoClient(MONGO_URI)
             db = client[DB_NAME]
             pid_list = df.get_column("productid").to_list()
+            # On demande à Mongo uniquement les champs dont on a besoin
+            mongo_fields = {"_id": 0, "productid": 1}
+            if "batch_id" in missing_cols:
+                mongo_fields["batch_id"] = 1
+            if "is_gold" in missing_cols:
+                mongo_fields["is_gold"] = 1
+            if "text" in missing_cols:
+                mongo_fields["designation"] = 1
+                mongo_fields["description"] = 1
             mongo_docs = db["X_raw_data_batches"].find(
-                {"productid": {"$in": pid_list}},
-                {"_id": 0, "productid": 1, "batch_id": 1, "is_gold": 1},
+                {"productid": {"$in": pid_list}}, mongo_fields,
             )
             mapping = {d["productid"]: d for d in mongo_docs}
             new_cols = []
@@ -287,6 +296,16 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             if "is_gold" in missing_cols:
                 new_cols.append(
                     pl.Series("is_gold", [mapping.get(pid, {}).get("is_gold", False) for pid in pid_list])
+                )
+            if "text" in missing_cols:
+                def _build_text(pid):
+                    d = mapping.get(pid, {})
+                    designation = d.get("designation") or ""
+                    description = d.get("description") or ""
+                    full_text = f"{designation}. {description}" if description else designation
+                    return clean_description(full_text)
+                new_cols.append(
+                    pl.Series("text", [_build_text(pid) for pid in pid_list])
                 )
             df = df.with_columns(new_cols)
             df.write_parquet(self.cache_path)
@@ -364,17 +383,21 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
 
     # --- Interface principale (M2 sklearn + évaluations) ------------------
     def get_sklearn_data(
-        self, split: Literal["train", "val"]
+    self,
+    split: Literal["train", "val"],
+    include_raw: bool = False,
     ) -> tuple[pl.DataFrame, np.ndarray]:
         """
         Retourne (X, y) du split interne 90/10 du train_pool.
-
         - "train" : 90% du pool, utilisé pour fit (en M2 le K-Fold consomme ça)
         - "val" : 10% du pool, utilisé pour diagnostics post-fit (calibration,
-                  confusion, stacking analysis). Ce n'est PAS du test métier.
+              confusion, stacking analysis). Ce n'est PAS du test métier.
 
-        Pour le test métier (gold) ou observer la généralisation à des données
-        futures (shadow batches), utiliser get_eval_data().
+        Args:
+            include_raw: si True, ajoute les colonnes 'text', 'imageid', 'productid'
+                     au DataFrame. Utile pour les BaseLearners non-frozen (TextCNN,
+                     ResNet50PartialFT) qui ont besoin de ces données brutes.
+                     Default False : comportement compatible avec M2 baseline.
         """
         if self._df_train is None or self._df_val is None:
             raise RuntimeError("setup() doit être appelé avant get_sklearn_data()")
@@ -388,31 +411,42 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             )
 
         feat_cols = self._text_cols + self._image_cols + self._tabular_cols
+        if include_raw:
+            feat_cols = feat_cols + ["text", "imageid", "productid"]
         X = df_map[split].select(feat_cols)
         y = df_map[split].get_column("label").to_numpy()
         return X, y
     
-    def get_train_pool(self) -> tuple[pl.DataFrame, np.ndarray]:
+    def get_train_pool(self, include_raw: bool = False) -> tuple[pl.DataFrame, np.ndarray]:
         """
         Retourne (X, y) du pool d'entraînement : batches autorisés, gold exclu.
         Chaque algo gère son propre split interne (K-Fold pour M2, train/val pour M3).
+
+        Args:
+            include_raw: si True, ajoute 'text', 'imageid', 'productid' au DataFrame.
         """
         if self._df_train_pool is None:
             raise RuntimeError("setup() doit être appelé avant get_train_pool()")
         feat_cols = self._text_cols + self._image_cols + self._tabular_cols
+        if include_raw:
+            feat_cols = feat_cols + ["text", "imageid", "productid"]
         X = self._df_train_pool.select(feat_cols)
         y = self._df_train_pool.get_column("label").to_numpy()
         return X, y
 
     def get_eval_data(
-        self,
-        kind: Literal["gold", "shadow"],
-        batch_id: int | None = None,
+    self,
+    kind: Literal["gold", "shadow"],
+    batch_id: int | None = None,
+    include_raw: bool = False,
     ) -> tuple[pl.DataFrame, np.ndarray]:
         """
         Retourne (X, y) pour évaluation.
         - "gold" : test set transverse (arbitre @champion)
         - "shadow" : batch hors train_batches (simule nouvelles données arrivées)
+
+        Args:
+            include_raw: si True, ajoute 'text', 'imageid', 'productid' au DataFrame.
         """
         if self._df_full is None:
             raise RuntimeError("setup() doit être appelé avant get_eval_data()")
@@ -437,9 +471,11 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             raise ValueError(f"Ensemble eval ({kind}, batch_id={batch_id}) vide")
 
         feat_cols = self._text_cols + self._image_cols + self._tabular_cols
+        if include_raw:
+            feat_cols = feat_cols + ["text", "imageid", "productid"]
         X = df_eval.select(feat_cols)
         y = df_eval.get_column("label").to_numpy()
-        print(f"[DataModule] get_eval_data({kind}, batch_id={batch_id}) : n={len(y)}")
+        print(f"[DataModule] get_eval_data({kind}, batch_id={batch_id}, include_raw={include_raw}) : n={len(y)}")
         return X, y
 
     # --- Properties pour exposer les listes de colonnes -------------------

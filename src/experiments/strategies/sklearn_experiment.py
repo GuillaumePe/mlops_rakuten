@@ -71,8 +71,13 @@ class SklearnExperiment:
                 mlflow.set_tags(self.tags)
 
             # 1. Récupérer les données
-            X_train, y_train = datamodule.get_sklearn_data("train")
-            X_val, y_val = datamodule.get_sklearn_data("val")
+            # include_raw : True si le modèle a besoin des colonnes brutes
+            # (text, imageid, productid) pour ses BaseLearners non-frozen (TextCNN,
+            # ResNet50PartialFT, etc.). Lu depuis les tags YAML pour découpler
+            # le DataModule de la connaissance du modèle.
+            include_raw = self.tags.get("requires_raw_data", "false").lower() == "true"
+            X_train, y_train = datamodule.get_sklearn_data("train", include_raw=include_raw)
+            X_val, y_val = datamodule.get_sklearn_data("val", include_raw=include_raw)
 
             # 2. Construire le modèle
             self.model = self.model_factory(None)
@@ -409,7 +414,8 @@ class SklearnExperiment:
         Returns:
             (y_gold, probas) pour réutilisation downstream (plots calibration, OvR)
         """
-        X_gold, y_gold = dm.get_eval_data("gold")
+        include_raw = self.tags.get("requires_raw_data", "false").lower() == "true"
+        X_gold, y_gold = dm.get_eval_data("gold", include_raw=include_raw)
         preds = self.model.predict(X_gold)
         probas = self.model.predict_proba(X_gold)
 
