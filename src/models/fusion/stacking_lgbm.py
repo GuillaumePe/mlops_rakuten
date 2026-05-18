@@ -91,7 +91,7 @@ class StackingLGBM:
             ("logreg", LogisticRegression(
                 max_iter=2000,
                 solver="lbfgs",
-                multi_class="multinomial",
+#                multi_class="multinomial",
                 n_jobs=-1,
             )),
         ])
@@ -100,7 +100,7 @@ class StackingLGBM:
             ("logreg", LogisticRegression(
                 max_iter=2000,
                 solver="lbfgs",
-                multi_class="multinomial",
+#                multi_class="multinomial",
                 n_jobs=-1,
             )),
         ])
