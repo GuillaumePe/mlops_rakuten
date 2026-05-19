@@ -35,7 +35,7 @@ model:
     max_epochs: 15
     patience: 2
     lr: 1.0e-3
-  # Hyperparams ResNet50 partial FT (à finaliser au Bloc M.2)
+  # Hyperparams ResNet50 partial FT 
   resnet50:
     n_unfrozen_layers: 27
     batch_size: 32
