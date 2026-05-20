@@ -331,36 +331,75 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self._tabular_cols = [c for c in df.columns if c.startswith("tab_")]
         self._df_full = df
 
-        # Train pool : batches autorisés AND not gold (ceinture + bretelles)
+        # ─────────────────────────────────────────────────────────────────────
+        # M.0 — Résolution du val_selection versionné
+        # ─────────────────────────────────────────────────────────────────────
+        self._val_selection_version = get_active_val_selection_version()
+        val_sel_col = f"is_val_selection_v{self._val_selection_version}"
+
+        if val_sel_col not in df.columns:
+            raise RuntimeError(
+                f"Colonne {val_sel_col!r} absente du cache parquet.\n"
+                f"Le val_selection_v{self._val_selection_version} n'a pas été initialisé.\n"
+                f"Action requise :\n"
+                f"    python src/data/init_val_selection.py --version {self._val_selection_version}\n"
+                f"puis relance ce DataModule."
+            )
+
+        # Niveau 1 — train_pool : batches autorisés AND not gold (inchangé)
+        # Utilisé par les assembled qui n'arbitrent pas @active (M2, M3, ...).
         mask_pool = pl.col("batch_id").is_in(self.train_batches)
         if self.exclude_gold:
             mask_pool = mask_pool & (~pl.col("is_gold"))
         self._df_train_pool = df.filter(mask_pool)
 
+        # Niveau 2a — val_selection : ~10% mis de côté pour arbitrer @active.
+        # Consommé uniquement par BaseLearnerExperiment.
+        mask_val_selection = mask_pool & pl.col(val_sel_col).cast(pl.Boolean)
+        self._df_val_selection = df.filter(mask_val_selection)
+
+        # Niveau 2b — train_pool_effective : sur-ensemble du split 80/20 standard.
+        # train_pool moins val_selection.
+        mask_pool_effective = mask_pool & (~pl.col(val_sel_col).cast(pl.Boolean))
+        self._df_train_pool_effective = df.filter(mask_pool_effective)
+
         n_total = df.height
         n_pool = self._df_train_pool.height
+        n_pool_eff = self._df_train_pool_effective.height
+        n_val_sel = self._df_val_selection.height
         n_gold = df.filter(pl.col("is_gold")).height
         n_shadow = n_total - n_pool - n_gold
         print(
-            f"[DataModule] Total={n_total} | train_pool={n_pool} "
-            f"(batches={self.train_batches}, gold_excluded={self.exclude_gold}) | "
-            f"gold={n_gold} | shadow={n_shadow}"
+            f"[DataModule] Total={n_total} | "
+            f"train_pool={n_pool} (batches={self.train_batches}, gold_excluded={self.exclude_gold}) "
+            f"| train_pool_effective={n_pool_eff} | val_selection_v{self._val_selection_version}={n_val_sel} "
+            f"| gold={n_gold} | shadow={n_shadow}"
         )
 
-        # Split train/val interne sur le pool (pour DataLoaders Lightning M3+)
-        labels_pool = self._df_train_pool.get_column("label").to_numpy()
-        indices_pool = np.arange(n_pool)
+        # Garde-fou : val_selection orthogonal à gold
+        n_leak_gold = df.filter(pl.col(val_sel_col).cast(pl.Boolean) & pl.col("is_gold")).height
+        if n_leak_gold != 0:
+            raise RuntimeError(
+                f"Bug critique : {n_leak_gold} samples sont à la fois val_selection_v"
+                f"{self._val_selection_version} ET gold. Cache parquet corrompu."
+            )
+
+        # Niveau 3 — split train/val standard 80/20 stratifié sur train_pool_effective.
+        # Sert : - aux BaseLearners deep (via X_val/y_val passés à fit())
+        #        - aux DataLoaders Lightning (train_dataloader/val_dataloader)
+        labels_pool_eff = self._df_train_pool_effective.get_column("label").to_numpy()
+        indices_pool_eff = np.arange(n_pool_eff)
         idx_train, idx_val = train_test_split(
-            indices_pool,
+            indices_pool_eff,
             test_size=self.val_size,
-            stratify=labels_pool,
+            stratify=labels_pool_eff,
             random_state=self.random_state,
         )
-        self._df_train = self._df_train_pool[idx_train.tolist()]
-        self._df_val = self._df_train_pool[idx_val.tolist()]
+        self._df_train = self._df_train_pool_effective[idx_train.tolist()]
+        self._df_val = self._df_train_pool_effective[idx_val.tolist()]
         print(
-            f"[DataModule] Split du train_pool : train={len(self._df_train)}, "
-            f"val={len(self._df_val)} (val_size={self.val_size})"
+            f"[DataModule] Split standard du train_pool_effective : "
+            f"train={len(self._df_train)}, val={len(self._df_val)} (val_size={self.val_size})"
         )
 
     # --- Interface Lightning (DataLoaders pour M3/M4) ---------------------
@@ -389,39 +428,50 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
 
     # --- Interface principale (M2 sklearn + évaluations) ------------------
     def get_sklearn_data(
-    self,
-    split: Literal["train", "val"],
-    include_raw: bool = False,
+        self,
+        split: Literal["train", "val", "train_pool", "train_pool_effective", "val_selection"],
+        include_raw: bool = False,
     ) -> tuple[pl.DataFrame, np.ndarray]:
         """
-        Retourne (X, y) du split interne 90/10 du train_pool.
-        - "train" : 90% du pool, utilisé pour fit (en M2 le K-Fold consomme ça)
-        - "val" : 10% du pool, utilisé pour diagnostics post-fit (calibration,
-              confusion, stacking analysis). Ce n'est PAS du test métier.
-
+        Retourne (X, y) selon le split demandé.
+ 
+        Splits standard d'entraînement (80/20 stratifié sur train_pool_effective) :
+        - "train" : 80% pour fit (consommé par BaseLearner.fit(X_train, y_train, ...))
+        - "val"   : 20% pour validation interne (early stopping, monitor)
+ 
+        Splits "structurels" (sans tirage aléatoire) :
+        - "train_pool" : tout sauf gold (assembled qui n'arbitrent pas @active)
+        - "train_pool_effective" : tout sauf gold ni val_selection
+        - "val_selection" : les ~10% mis de côté pour arbitrer les promotions @active
+ 
+        Pour gold ou shadow batches, utiliser get_eval_data().
+ 
         Args:
             include_raw: si True, ajoute les colonnes 'text', 'imageid', 'productid'
-                     au DataFrame. Utile pour les BaseLearners non-frozen (TextCNN,
-                     ResNet50PartialFT) qui ont besoin de ces données brutes.
-                     Default False : comportement compatible avec M2 baseline.
+                         au DataFrame. Utile pour les BaseLearners non-frozen
+                         (TextCNN, ResNet50PartialFT, etc.).
         """
         if self._df_train is None or self._df_val is None:
             raise RuntimeError("setup() doit être appelé avant get_sklearn_data()")
-
-        df_map = {"train": self._df_train, "val": self._df_val}
+        df_map = {
+            "train": self._df_train,
+            "val": self._df_val,
+            "train_pool": self._df_train_pool,
+            "train_pool_effective": self._df_train_pool_effective,
+            "val_selection": self._df_val_selection,
+        }
         if split not in df_map:
             raise ValueError(
-                f"split={split} non supporté. Utiliser 'train' ou 'val' pour le "
-                "split interne du pool, ou get_eval_data('gold'/'shadow') pour "
-                "l'évaluation métier."
+                f"split={split!r} non supporté. Valides : {list(df_map.keys())}. "
+                f"Pour gold ou shadow, utiliser get_eval_data()."
             )
-
         feat_cols = self._text_cols + self._image_cols + self._tabular_cols
         if include_raw:
             feat_cols = feat_cols + ["text", "imageid", "productid"]
         X = df_map[split].select(feat_cols)
         y = df_map[split].get_column("label").to_numpy()
         return X, y
+
     
     def get_train_pool(self, include_raw: bool = False) -> tuple[pl.DataFrame, np.ndarray]:
         """
