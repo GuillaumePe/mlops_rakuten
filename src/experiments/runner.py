@@ -170,17 +170,81 @@ def build_m2_baseline_experiment(config: dict) -> tuple[RakutenLightningDataModu
         tags=combined_tags,
     )
     return dm, experiment
+def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataModule, "BaseLearnerExperiment"]:
+    """
+    M.5 — Assemble DataModule + BaseLearnerExperiment pour un base learner (TextCNN, ResNet50, etc.).
+ 
+    Config attendue :
+    ```yaml
+    datamodule:
+      mode: "base_learners"  # Mode où on récupère les features brutes
+      ...
+    learner:
+      name: "textcnn" ou "resnet50_partial_ft"
+      config: {...}  # hyperparams du learner
+    mlflow:
+      experiment_name: "base_learners_phase1"
+      run_name: "textcnn_run_1"
+      ...
+    ```
+    """
+    from src.experiments.strategies.base_learner_experiment import BaseLearnerExperiment
+ 
+    dm_cfg = config["datamodule"]
+    dm = RakutenLightningDataModule(
+        mode=dm_cfg.get("mode", "base_learners"),
+        text_model=dm_cfg.get("text_model", None),
+        image_model=dm_cfg.get("image_model", None),
+        batch_size=dm_cfg.get("batch_size", 64),
+        num_workers=dm_cfg.get("num_workers", 4),
+        val_size=dm_cfg.get("val_size", 0.10),
+        random_state=dm_cfg.get("random_state", 42),
+        limit=config.get("limit"),
+        train_batches=dm_cfg.get("train_batches", [1]),
+        exclude_gold=dm_cfg.get("exclude_gold", True),
+    )
+ 
+    learner_cfg = config["learner"]
+    learner_name = learner_cfg["name"]
+    learner_config = learner_cfg.get("config", {})
+ 
+    mlflow_cfg = config["mlflow"]
+    tracking_uri = mlflow_cfg.get("tracking_uri", "http://mlflow:5000")
+    experiment_name = mlflow_cfg.get("experiment_name", "base_learners_phase1")
+ 
+    # Instancier BaseLearnerExperiment (Strategy pattern)
+    experiment = BaseLearnerExperiment(
+        learner_name=learner_name,
+        config=learner_config,
+        tracking_uri=tracking_uri,
+        experiment_name=experiment_name,
+        data_folder=Path(dm_cfg.get("data_folder", "data/raw_data")),
+    )
+ 
+    return dm, experiment
+
 # Registry des constructeurs par expérience.
 EXPERIMENT_BUILDERS = {
     "m2": build_m2_experiment,                  # legacy M2Stacking (à déprécier après L.5 validé)
     "m2_baseline": build_m2_baseline_experiment,  # nouvelle archi modulaire Phase 1
+    "base_learner_textcnn": build_base_learner_experiment,
+    "base_learner_resnet50_partial_ft": build_base_learner_experiment,
+
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Commands (actions)
+# ─────────────────────────────────────────────────────────────────────────────
+ 
 
 def cmd_prepare_data(dm: RakutenLightningDataModule):
     """Extrait/met à jour le cache d'embeddings. Étape lourde (GPU recommandé)."""
-    print(f"[Runner] prepare_data() — cache: {dm.cache_path}")
-    dm.prepare_data()
+    print(f"[Runner] prepare_data() — cache: {dm.cache_path if hasattr(dm, 'cache_path') else 'N/A'}")
+    if hasattr(dm, 'prepare_data'):
+        dm.prepare_data()
+    else:
+        print("[Runner] DataModule n'a pas de prepare_data() (OK pour base_learners)")
+
 
 
 def cmd_fit(dm: RakutenLightningDataModule, experiment: SklearnExperiment):
@@ -203,6 +267,16 @@ def cmd_evaluate(dm: RakutenLightningDataModule, experiment: SklearnExperiment):
     results = experiment.evaluate(dm)
     print(f"[Runner] Résultats sur test : {results}")
     return results
+
+def cmd_fit_base_learner(dm: RakutenLightningDataModule, experiment):
+    """M.5 — Action pour fit un base learner (TextCNN, ResNet50PartialFT, etc.)."""
+    print("[Runner.M5] fit_base_learner() — orchestration BaseLearnerExperiment")
+    print("[Runner.M5] setup()...")
+    dm.setup()
+    print("[Runner.M5] fit() avec MLflow tracking + alias promotion...")
+    experiment.fit(dm)
+    print("[Runner.M5] fit_base_learner() terminé")
+
 
 def cmd_smoke_tailscale():
     """
@@ -451,7 +525,7 @@ def main():
     )
     parser.add_argument(
         "--action", required=True,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "submit_cloud", "smoke_tailscale","fetch_logs"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner", "submit_cloud", "smoke_tailscale","fetch_logs"],
         help="Action à exécuter",
     )
     parser.add_argument(
@@ -549,6 +623,10 @@ def main():
         cmd_prepare_data(dm)
         cmd_fit(dm, experiment)
         cmd_evaluate(dm, experiment)
+    elif args.action == "fit_base_learner":
+        cmd_fit_base_learner(dm, experiment)
+    elif args.action == "fetch_logs":
+        cmd_fetch_logs(args)
 
 
 if __name__ == "__main__":

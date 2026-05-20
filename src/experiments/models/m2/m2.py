@@ -28,8 +28,8 @@ deprecated:: Phase 1
     Cette classe est conservée pour rollback rapide pendant la transition
     Phase 1 et sera supprimée en fin de Phase 1 (Bloc R).
     
-    Migration : utiliser `--experiment m2_baseline` au lieu de `--experiment m2`.
-"""
+    Migration : utiliser `--experiment m2_baseline` au lieu de `--experiment m2`."""
+from __future__ import annotations
 import warnings
 warnings.warn(
     "M2Stacking is deprecated and will be removed in Phase 1 end. "
@@ -38,7 +38,7 @@ warnings.warn(
     stacklevel=2,
 )
 
-from __future__ import annotations
+
 from typing import Optional
 
 import mlflow

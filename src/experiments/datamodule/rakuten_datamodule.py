@@ -30,7 +30,7 @@ import torch
 from pymongo import MongoClient
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
-
+import mlflow
 from src.experiments.datamodule.encoders import TextEncoder, ImageEncoder, slugify_model_name
 from src.experiments.datamodule.datasets import EmbeddingsDataset, RawMultimodalDataset
 from src.experiments.datamodule.tabular_features import (
@@ -42,9 +42,11 @@ from src.experiments.datamodule.tabular_features import (
 from src.features.utils import clean_description  # legacy, à refondre en Bloc F
 from src.models.utils import get_active_val_selection_version
 
+import logging
 from dotenv import load_dotenv
 load_dotenv()
 
+logger = logging.getLogger(__name__)
 # Constantes Mongo et chemins data
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
 DB_NAME = "MAR25_CMLOPS_RAKUTEN"
@@ -71,7 +73,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
 
     def __init__(
         self,
-        mode: Literal["m2_embeddings", "raw_for_finetune", "m4_embeddings"] = "m2_embeddings",
+        mode: Literal["m2_embeddings", "raw_for_finetune", "m4_embeddings","m2_benchmark"] = "m2_embeddings",
         text_model: str = "dangvantuan/sentence-camembert-base",
         image_model: str = "resnet18",
         cache_version: int = 1,
@@ -116,6 +118,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self._df_val_selection: pl.DataFrame | None = None
         self._val_selection_version: int | None = None
 
+        self._base_learner_caches: dict[str, pl.DataFrame] | None = None
     # --- prepare_data : extraction + cache incrémental --------------------
 
     def prepare_data(self):
@@ -264,7 +267,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         Le split train/val interne (pour early stopping en M3, par exemple) est
         un split 90/10 du train_pool, utilisé par les DataLoaders Lightning.
         """
-        if self.mode != "m2_embeddings":
+        if self.mode not in ("m2_embeddings", "m2_benchmark"):
             raise NotImplementedError(f"setup pour mode={self.mode} non encore supporté")
 
         if not self.cache_path.exists():
@@ -401,6 +404,22 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             f"[DataModule] Split standard du train_pool_effective : "
             f"train={len(self._df_train)}, val={len(self._df_val)} (val_size={self.val_size})"
         )
+        
+        # M.7 — Charger les caches base learners si mode=m2_benchmark
+        if self.mode == "m2_benchmark":
+            logger.info("[DataModule.M7] Mode m2_benchmark : chargement caches base learners...")
+            self._base_learner_caches = {}
+            for learner_name in ("textcnn", "resnet50_partial_ft"):
+                try:
+                    df_cache = self._load_base_learner_embeddings(learner_name)
+                    self._base_learner_caches[learner_name] = df_cache
+                    logger.info(f"[DataModule.M7] ✓ Loaded {learner_name} cache ({len(df_cache)} samples)")
+                except FileNotFoundError as e:
+                    logger.warning(f"[DataModule.M7] ✗ {learner_name} cache not found: {e}")
+                    raise
+                except RuntimeError as e:
+                    logger.error(f"[DataModule.M7] ✗ {learner_name} guard-fou failed: {e}")
+                    raise
 
     # --- Interface Lightning (DataLoaders pour M3/M4) ---------------------
 
@@ -472,7 +491,113 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         y = df_map[split].get_column("label").to_numpy()
         return X, y
 
-    
+    def _load_base_learner_embeddings(self, learner_name: str) -> pl.DataFrame:
+        """
+        M.7 — Charge le cache parquet d'un base learner avec validation guard-fou.
+ 
+            Valide que le cache a été produit par la version @active courante du modèle.
+ 
+        Args:
+            learner_name: "textcnn", "resnet50_partial_ft", etc.
+ 
+        Returns:
+            DataFrame avec les colonnes d'embeddings du learner.
+ 
+        Raises:
+            FileNotFoundError: cache inexistant
+            RuntimeError: désync entre cache et MLflow @active
+        """
+   
+ 
+        # Résoudre le chemin du cache
+        cache_filename = (
+            f"embeddings_{learner_name}_"
+            f"v{self._val_selection_version}.parquet"
+        )
+        cache_path = CACHE_DIR / cache_filename
+ 
+        # 1. Vérifier que le cache existe
+        if not cache_path.exists():
+            raise FileNotFoundError(
+                f"Cache base learner introuvable : {cache_path}\n"
+                f"Action requise :\n"
+                f"    python -m src.experiments.runner "
+                f"--experiment base_learner_{learner_name} "
+                f"--action fit_base_learner"
+            )
+ 
+        # 2. Lire le cache
+        df_cache = pl.read_parquet(cache_path)
+        logger.debug(
+            f"[DataModule.M7._load_base_learner_embeddings] "
+            f"Cache chargé : {cache_path} ({len(df_cache)} samples)"
+        )
+ 
+        # 3. Vérifier les métadonnées de traçabilité
+        if "source_model_name" not in df_cache.columns:
+            raise ValueError(
+                f"Cache {cache_filename} corrompu : colonne 'source_model_name' manquante"
+            )
+        if "source_model_version" not in df_cache.columns:
+            raise ValueError(
+                f"Cache {cache_filename} corrompu : colonne 'source_model_version' manquante"
+            )
+ 
+        # 4. Vérifier unicité
+        unique_names = df_cache.get_column("source_model_name").unique().to_list()
+        unique_versions = (
+            df_cache.get_column("source_model_version").unique().to_list()
+        )
+ 
+        if len(unique_names) > 1:
+            raise RuntimeError(
+                f"Cache {cache_filename} hétérogène : "
+                f"multiple source_model_name = {unique_names}"
+            )
+        if len(unique_versions) > 1:
+            raise RuntimeError(
+                f"Cache {cache_filename} hétérogène : "
+                f"multiple source_model_version = {unique_versions}"
+            )
+ 
+        source_model_name = unique_names[0]
+        source_model_version = int(unique_versions[0])
+ 
+        # 5. Guard-fou : vérifier @active en MLflow
+        client = mlflow.tracking.MlflowClient()
+        try:
+            active_mv = client.get_model_version_by_alias(source_model_name, "active")
+            active_version = int(active_mv.version)
+        except mlflow.exceptions.MlflowException as e:
+            raise RuntimeError(
+                f"Modèle {source_model_name} n'a pas d'alias @active en MLflow. "
+                f"Guard-fou M.7 échoue.\n"
+                f"Lancer fit_base_learner pour {learner_name} d'abord."
+            ) from e
+ 
+        # 6. Comparaison : version du cache vs @active courant
+        if source_model_version != active_version:
+            raise RuntimeError(
+                f"DESYNC CRITIQUE — Cache vs MLflow @active :\n"
+                f"Cache {cache_filename}:\n"
+                f"source_model_name: {source_model_name}\n"
+                f"source_model_version: {source_model_version}\n"
+                f"MLflow @active:\n"
+                f"{source_model_name} @active v{active_version}\n"
+                f"\n"
+                f"Action :\n"
+                f"    python -m src.experiments.runner "
+                f"--experiment base_learner_{learner_name} "
+                f"--action fit_base_learner"
+            )
+ 
+        logger.debug(
+            f"[DataModule.M7._load_base_learner_embeddings] "
+            f"Guard-fou OK : {source_model_name} v{active_version} @active"
+        )
+ 
+        return df_cache
+
     def get_train_pool(self, include_raw: bool = False) -> tuple[pl.DataFrame, np.ndarray]:
         """
         Retourne (X, y) du pool d'entraînement : batches autorisés, gold exclu.
@@ -563,3 +688,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         return sorted(
             self._df_full.get_column("batch_id").drop_nulls().unique().to_list()
         )
+    
+
+
+    
