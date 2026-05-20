@@ -1,3 +1,4 @@
+from __future__ import annotations
 import mlflow
 import optuna
 import numpy as np
@@ -7,6 +8,14 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from lightgbm import LGBMClassifier
 from sklearn.metrics import f1_score
+from dataclasses import dataclass
+ 
+import logging
+import os
+from typing import Optional
+ 
+logger = logging.getLogger(__name__)
+ 
 
 def get_or_create_experiment(experiment_name):
   """
@@ -321,9 +330,6 @@ def get_f1_score_from_model_uri(model_uri: str, metric_name: str = "f1_score") -
     except Exception as e:
         raise RuntimeError(f"Erreur lors de la récupération du f1-score depuis {model_uri} : {e}")
 
-from dataclasses import dataclass
-from typing import Optional
-
 
 @dataclass
 class PromotionResult:
@@ -434,3 +440,125 @@ def evaluate_promotion_via_logged_metrics(
             gain=gain,
             epsilon=epsilon,
         )
+    
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 1 — Convention val_selection versionné (Bloc M.0)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Le val_selection est un 3ème split orthogonal au gold, qui sert d'arbitre
+# pour les promotions @active (au niveau base learner) et @active_text /
+# @active_image (au niveau modalité). Il est versionné car re-créé à chaque
+# ingestion d'un nouveau batch (v1 = batch_1, v2 = batch_1∪batch_2, etc.).
+#
+# La variable d'environnement ACTIVE_VAL_SELECTION_VERSION détermine quelle
+# version est utilisée pour résoudre les colonnes is_val_selection_v{N} dans
+# _df_full et pour piloter les promotions @active.
+#
+# Voir checklist_phase_1.md (section "Conventions Phase 1") pour la spec
+# complète. Détails M.0 dans scripts/init_val_selection.py.
+# ═════════════════════════════════════════════════════════════════════════════
+ 
+ACTIVE_VAL_SELECTION_VERSION_ENV = "ACTIVE_VAL_SELECTION_VERSION"
+DEFAULT_VAL_SELECTION_VERSION = 1  # Phase 1 démarrage : v1 obligatoire après init
+ 
+ 
+def get_active_val_selection_version() -> int:
+    """
+    Retourne la version courante du val_selection à utiliser pour les évaluations
+    et les promotions @active.
+ 
+    Sources de résolution (premier non-None gagne) :
+      1. Variable d'environnement ACTIVE_VAL_SELECTION_VERSION
+      2. Airflow Variable du même nom (si Airflow disponible dans le contexte)
+      3. Valeur par défaut DEFAULT_VAL_SELECTION_VERSION (= 1)
+ 
+    Le retour est int ∈ {1, 2, 3} (Phase 1 limite à 3 batches).
+ 
+    Raises:
+        ValueError: si la valeur résolue n'est pas un entier dans [1, 3].
+ 
+    Examples:
+        >>> os.environ["ACTIVE_VAL_SELECTION_VERSION"] = "2"
+        >>> get_active_val_selection_version()
+        2
+        >>> del os.environ["ACTIVE_VAL_SELECTION_VERSION"]
+        >>> get_active_val_selection_version()
+        1
+    """
+    raw: Optional[str] = os.environ.get(ACTIVE_VAL_SELECTION_VERSION_ENV)
+ 
+    if raw is None:
+        raw = _try_read_airflow_variable(ACTIVE_VAL_SELECTION_VERSION_ENV)
+ 
+    if raw is None:
+        logger.debug(
+            f"{ACTIVE_VAL_SELECTION_VERSION_ENV} non défini, utilise défaut "
+            f"= {DEFAULT_VAL_SELECTION_VERSION}"
+        )
+        return DEFAULT_VAL_SELECTION_VERSION
+ 
+    try:
+        version = int(raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"{ACTIVE_VAL_SELECTION_VERSION_ENV}={raw!r} n'est pas un entier valide. "
+            f"Attendu : 1, 2 ou 3."
+        ) from e
+ 
+    if version not in (1, 2, 3):
+        raise ValueError(
+            f"{ACTIVE_VAL_SELECTION_VERSION_ENV}={version} hors plage. "
+            f"Attendu : 1, 2 ou 3 (Phase 1)."
+        )
+ 
+    return version
+ 
+ 
+def _try_read_airflow_variable(key: str) -> Optional[str]:
+    """Lecture best-effort d'une Airflow Variable, retourne None si Airflow
+    n'est pas dans le contexte d'exécution (ex: lancement local hors DAG)."""
+    try:
+        from airflow.models import Variable  # noqa: WPS433 (lazy import volontaire)
+        return Variable.get(key, default_var=None)
+    except Exception:  # ImportError, AirflowException, etc.
+        return None
+ 
+ 
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 1 — Helpers MLflow alias @active (Bloc M.3) — STUBS
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# La mécanique @active / @active_text / @active_image complète sera implémentée
+# en M.3 (cf. checklist_phase_1.md, section "Conventions Phase 1"). Pour M.0,
+# on expose juste les stubs pour que les imports compilent. L'implémentation
+# détaillée arrive avec M.4 (BaseLearnerExperiment).
+#
+# ⚠ NE PAS CONFONDRE avec les helpers @champion existants plus haut dans ce
+# fichier (promotion_exclusive_best_model_to_production, etc.). Les deux
+# mécaniques coexistent :
+#   - @champion : arbitre = gold, niveau assembled (Bloc P)
+#   - @active   : arbitre = val_selection, niveau base learner (Bloc M.4)
+# ═════════════════════════════════════════════════════════════════════════════
+ 
+def resolve_active_modality(modality: str) -> tuple[str, int]:
+    """[STUB M.3] Retourne (registered_model_name, version) du base learner
+    promu @active_<modality>. Voir checklist_phase_1.md."""
+    raise NotImplementedError("À implémenter en M.3")
+ 
+ 
+def refresh_modality_alias(modality: str) -> None:
+    """[STUB M.3] Cascade auto : (re)pose @active_<modality> sur le base learner
+    dont le @active a le meilleur F1 val_selection. Voir checklist_phase_1.md."""
+    raise NotImplementedError("À implémenter en M.3")
+ 
+ 
+def compute_promotion_decision(
+    name: str,
+    run_id_new: str,
+    threshold: float = 0.005,
+) -> bool:
+    """[STUB M.3] True si nouvelle version bat l'@active courant de > threshold
+    sur le val_selection actif. Voir checklist_phase_1.md."""
+    raise NotImplementedError("À implémenter en M.3")
+
+ 
