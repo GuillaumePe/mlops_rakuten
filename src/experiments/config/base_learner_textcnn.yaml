@@ -1,0 +1,37 @@
+# M.6a — Config TextCNN (Phase 1 Bloc M)
+# Usage: python -m src.experiments.runner --experiment base_learner_textcnn --action fit_base_learner
+
+datamodule:
+  mode: "base_learners"
+  batch_size: 32
+  num_workers: 4
+  val_size: 0.10
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+  data_folder: "data/raw_data"
+
+learner:
+  name: "textcnn"
+  config:
+    # Tokenisation
+    vocab_size: 50000
+    embed_dim: 300
+    # Architecture CNN
+    n_filters: 512
+    kernel_sizes: [1, 2, 3, 4, 5, 6]
+    # Regularisation
+    dropout: 0.5
+    # Optimisation
+    lr: 1e-3
+    weight_decay: 0.0
+
+mlflow:
+  tracking_uri: "http://mlflow:5000"
+  experiment_name: "base_learners_phase1"
+  run_name: "textcnn_m22"
+  tags:
+    phase: "1"
+    bloc: "M"
+    learner: "textcnn"
+    modality: "text"

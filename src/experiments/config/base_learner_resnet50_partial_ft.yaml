@@ -1,0 +1,40 @@
+# M.6b — Config ResNet50PartialFT (Phase 1 Bloc M)
+# Usage: python -m src.experiments.runner --experiment base_learner_resnet50_partial_ft --action fit_base_learner
+
+datamodule:
+  mode: "base_learners"
+  batch_size: 32
+  num_workers: 4
+  val_size: 0.10
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+  data_folder: "data/raw_data"
+
+learner:
+  name: "resnet50_partial_ft"
+  config:
+    # Training
+    batch_size: 32
+    max_epochs: 15
+    patience: 3
+    # Learning rates (differential)
+    lr_head: 1e-3
+    lr_backbone: 1e-5
+    # Regularisation
+    weight_decay: 1e-4
+    # Hardware
+    num_workers: 4
+    random_state: 42
+    # Precision
+    precision: "bf16-mixed"
+
+mlflow:
+  tracking_uri: "http://mlflow:5000"
+  experiment_name: "base_learners_phase1"
+  run_name: "resnet50_partial_ft_m22"
+  tags:
+    phase: "1"
+    bloc: "M"
+    learner: "resnet50_partial_ft"
+    modality: "image"
