@@ -347,37 +347,52 @@ class ResNet50PartialFT(BaseLearner):
 
     def fit(
         self,
-        X: pl.DataFrame,
-        y: np.ndarray,
-        val_split: float = 0.2,
+        X_train: pl.DataFrame,
+        y_train: np.ndarray,
+        X_val: pl.DataFrame | None = None,
+        y_val: np.ndarray | None = None,
     ) -> "ResNet50PartialFT":
         """
         Fine-tune ResNet50 partial avec early stopping interne.
 
-        Étapes :
-        1. Construit les chemins d'image depuis (productid, imageid)
-        2. Split stratifié 80/20 (train/val)
-        3. Fit Lightning avec early stopping sur val_f1_weighted
-        """
-        image_paths = self._build_image_paths(X)
-        if len(image_paths) != len(y):
-            raise ValueError(f"len(X)={len(image_paths)} != len(y)={len(y)}")
+        Convention M.0 : le DataModule fournit X_train/X_val pré-splittés.
+        Si X_val=None, fallback sur un split interne par compatibilité notebook.
 
-        # Split stratifié train/val interne
-        idx = np.arange(len(y))
-        idx_tr, idx_val = train_test_split(
-            idx,
-            test_size=val_split,
-            stratify=y,
-            random_state=self._random_state,
-        )
-        paths_tr = [image_paths[i] for i in idx_tr]
-        paths_val = [image_paths[i] for i in idx_val]
-        y_tr = y[idx_tr]
-        y_val = y[idx_val]
+        Étapes :
+        1. (fallback) Si X_val=None → split interne 80/20 stratifié
+        2. Construit les chemins d'image train + val depuis (productid, imageid)
+        3. DataLoaders : train avec augmentation, val sans
+        4. Fit Lightning avec early stopping sur val_f1_weighted
+        """
+        if (X_val is None) != (y_val is None):
+            raise ValueError(
+                "X_val et y_val doivent être tous deux fournis ou tous deux None."
+            )
+
+        if X_val is None:
+            print(f"[ResNet50PartialFT] WARN: pas de X_val fourni, fallback split interne "
+                  f"80/20 stratifié seed={self._random_state} (mode notebook).")
+            idx = np.arange(len(y_train))
+            idx_tr, idx_v = train_test_split(
+                idx,
+                test_size=0.2,
+                stratify=y_train,
+                random_state=self._random_state,
+            )
+            X_val = X_train[idx_v.tolist()]
+            y_val = y_train[idx_v]
+            X_train = X_train[idx_tr.tolist()]
+            y_train = y_train[idx_tr]
+
+        paths_tr = self._build_image_paths(X_train)
+        paths_val = self._build_image_paths(X_val)
+        if len(paths_tr) != len(y_train):
+            raise ValueError(f"len(X_train)={len(paths_tr)} != len(y_train)={len(y_train)}")
+        if len(paths_val) != len(y_val):
+            raise ValueError(f"len(X_val)={len(paths_val)} != len(y_val)={len(y_val)}")
 
         # DataLoaders : train avec augmentation, val sans
-        train_loader = self._make_loader(paths_tr, y_tr, self._train_transform, shuffle=True)
+        train_loader = self._make_loader(paths_tr, y_train, self._train_transform, shuffle=True)
         val_loader = self._make_loader(paths_val, y_val, self._eval_transform, shuffle=False)
 
         # Modèle Lightning

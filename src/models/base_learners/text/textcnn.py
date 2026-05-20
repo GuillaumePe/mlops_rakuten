@@ -341,39 +341,58 @@ class TextCNN(BaseLearner):
 
     def fit(
         self,
-        X: pl.DataFrame,
-        y: np.ndarray,
-        val_split: float = 0.2,
+        X_train: pl.DataFrame,
+        y_train: np.ndarray,
+        X_val: pl.DataFrame | None = None,
+        y_val: np.ndarray | None = None,
     ) -> "TextCNN":
         """
         Entraîne le TextCNN avec early stopping interne.
 
+        Convention M.0 : le DataModule fournit X_train/X_val pré-splittés
+        (80/20 stratifié seed=42 sur train_pool_effective). Si X_val=None,
+        fallback sur un split interne par compatibilité notebook.
+
         Étapes :
-        1. Build vocab top-K=50k sur l'ensemble du train (PAS sur train+val
-           interne, car val est censé être out-of-sample du POV du modèle)
-        2. Split stratifié 80/20 (train/val) en interne
-        3. Re-build vocab sur seulement le 80% train (évite la fuite val→train)
-        4. Tokenize les 2 splits
-        5. Fit Lightning avec early stopping sur val_f1_weighted
+        1. (fallback) Si X_val=None → split interne 80/20 stratifié
+        2. Build vocab top-K=50k UNIQUEMENT sur X_train (anti-fuite val→vocab)
+        3. Tokenize X_train et X_val
+        4. Fit Lightning avec early stopping sur val_f1_weighted
         """
-        texts = self._extract_texts(X)
-        if len(texts) != len(y):
-            raise ValueError(f"len(X)={len(texts)} != len(y)={len(y)}")
+        if (X_val is None) != (y_val is None):
+            raise ValueError(
+                "X_val et y_val doivent être tous deux fournis ou tous deux None."
+            )
 
-        # Split stratifié train/val interne
-        idx = np.arange(len(y))
-        idx_tr, idx_val = train_test_split(
-            idx,
-            test_size=val_split,
-            stratify=y,
-            random_state=self._random_state,
-        )
-        texts_tr = [texts[i] for i in idx_tr]
-        texts_val = [texts[i] for i in idx_val]
-        y_tr = y[idx_tr]
-        y_val = y[idx_val]
+        if X_val is None:
+            print(f"[TextCNN] WARN: pas de X_val fourni, fallback split interne "
+                  f"80/20 stratifié seed={self._random_state} (mode notebook).")
+            idx = np.arange(len(y_train))
+            idx_tr, idx_v = train_test_split(
+                idx,
+                test_size=0.2,
+                stratify=y_train,
+                random_state=self._random_state,
+            )
+            X_val = X_train[idx_v.tolist()]
+            y_val = y_train[idx_v]
+            X_train = X_train[idx_tr.tolist()]
+            y_train = y_train[idx_tr]
 
-        # Build vocab UNIQUEMENT sur le 80% train (pas de fuite val→vocab)
+        texts_tr = self._extract_texts(X_train)
+        texts_val = self._extract_texts(X_val)
+        if len(texts_tr) != len(y_train):
+            raise ValueError(
+                f"len(X_train)={len(texts_tr)} != len(y_train)={len(y_train)}"
+            )
+        if len(texts_val) != len(y_val):
+            raise ValueError(
+                f"len(X_val)={len(texts_val)} != len(y_val)={len(y_val)}"
+            )
+
+        # Build vocab UNIQUEMENT sur le train (anti-fuite val→vocab).
+        # Garantie par construction : X_train fourni par le DataModule
+        # n'inclut PAS les samples de X_val (split orthogonal).
         self.vocab = _build_vocab(texts_tr, top_k=self._vocab_size_cap)
         print(f"[TextCNN] Vocab construit : {len(self.vocab)} tokens "
               f"(top-{self._vocab_size_cap} demandés)")
@@ -383,7 +402,7 @@ class TextCNN(BaseLearner):
         ids_val = _tokenize_and_pad(texts_val, self.vocab, self._max_len)
 
         # DataLoaders
-        train_loader = self._make_loader(ids_tr, y_tr, shuffle=True)
+        train_loader = self._make_loader(ids_tr, y_train, shuffle=True)
         val_loader = self._make_loader(ids_val, y_val, shuffle=False)
 
         # Modèle Lightning
