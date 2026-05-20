@@ -40,6 +40,7 @@ from src.experiments.datamodule.tabular_features import (
     IMAGE_TABULAR_COLS,
 )
 from src.features.utils import clean_description  # legacy, à refondre en Bloc F
+from src.models.utils import get_active_val_selection_version
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -109,6 +110,11 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self._text_cols: list[str] | None = None
         self._image_cols: list[str] | None = None
         self._tabular_cols: list[str] | None = None
+
+        # Placeholders M.0 (val_selection versionné)
+        self._df_train_pool_effective: pl.DataFrame | None = None
+        self._df_val_selection: pl.DataFrame | None = None
+        self._val_selection_version: int | None = None
 
     # --- prepare_data : extraction + cache incrémental --------------------
 
