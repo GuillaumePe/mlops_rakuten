@@ -56,15 +56,21 @@ class ResNet18Frozen(BaseLearner):
 
     def fit(
         self,
-        X: pl.DataFrame,
-        y: np.ndarray,
-        val_split: float = 0.2,
+        X_train: pl.DataFrame,
+        y_train: np.ndarray | None = None,
+        X_val: pl.DataFrame | None = None,
+        y_val: np.ndarray | None = None,
     ) -> "ResNet18Frozen":
-        """No-op (cf. CamembertFrozen.fit)."""
-        missing = [c for c in self.cols if c not in X.columns]
+        """
+        No-op pour un learner frozen (cf. CamembertFrozen.fit).
+
+        Les arguments y_train, X_val, y_val sont ignorés (passe-plat sans
+        entraînement).
+        """
+        missing = [c for c in self.cols if c not in X_train.columns]
         if missing:
             raise ValueError(
-                f"ResNet18Frozen.fit : {len(missing)} colonnes manquantes dans X. "
+                f"ResNet18Frozen.fit : {len(missing)} colonnes manquantes dans X_train. "
                 f"Premières manquantes : {missing[:3]}. "
                 f"Le cache parquet du RakutenLightningDataModule a-t-il été produit ?"
             )

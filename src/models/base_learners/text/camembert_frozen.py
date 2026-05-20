@@ -59,9 +59,10 @@ class CamembertFrozen(BaseLearner):
 
     def fit(
         self,
-        X: pl.DataFrame,
-        y: np.ndarray,
-        val_split: float = 0.2,
+        X_train: pl.DataFrame,
+        y_train: np.ndarray | None = None,
+        X_val: pl.DataFrame | None = None,
+        y_val: np.ndarray | None = None,
     ) -> "CamembertFrozen":
         """
         No-op pour un learner frozen.
@@ -70,13 +71,16 @@ class CamembertFrozen(BaseLearner):
         parquet). Le LogReg qui transforme ces embeddings en probas est géré
         par StackingLGBM en aval (K-Fold OOF + refit final).
 
-        On vérifie quand même que X contient bien les colonnes attendues —
-        échec rapide si le cache n'a pas été produit.
+        On vérifie quand même que X_train contient bien les colonnes attendues
+        — échec rapide si le cache n'a pas été produit.
+
+        Les arguments y_train, X_val, y_val sont ignorés (passe-plat sans
+        entraînement).
         """
-        missing = [c for c in self.cols if c not in X.columns]
+        missing = [c for c in self.cols if c not in X_train.columns]
         if missing:
             raise ValueError(
-                f"CamembertFrozen.fit : {len(missing)} colonnes manquantes dans X. "
+                f"CamembertFrozen.fit : {len(missing)} colonnes manquantes dans X_train. "
                 f"Premières manquantes : {missing[:3]}. "
                 f"Le cache parquet du RakutenLightningDataModule a-t-il été produit ?"
             )

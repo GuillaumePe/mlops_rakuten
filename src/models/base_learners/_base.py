@@ -3,9 +3,10 @@ Interface BaseLearner : contrat commun pour tous les base learners
 (texte, image, tabulaire) consommés par les modèles assemblés Phase 1.
 
 Cycle de vie standard :
-1. fit(X, y, val_split) : training avec early stopping interne pour les deep learners,
-   fit direct pour les sklearn-style. Idempotent : appeler fit() deux fois écrase
-   l'état précédent.
+1. fit(X_train, y_train, X_val, y_val) : training avec early stopping interne
+   pour les deep learners, fit direct pour les sklearn-style. Idempotent :
+   appeler fit() deux fois écrase l'état précédent. Les frozen learners
+   ignorent X_val/y_val (passe-plats).
 2. extract_embeddings(X) : forward pass en mode eval, retourne (n, embed_dim).
    Reproductible : appel deux fois sur la même entrée → même sortie (model.eval()
    + torch.no_grad() pour les deep).
@@ -95,25 +96,38 @@ class BaseLearner(ABC):
     @abstractmethod
     def fit(
         self,
-        X: pl.DataFrame,
-        y: np.ndarray,
-        val_split: float = 0.2,
+        X_train: pl.DataFrame,
+        y_train: np.ndarray,
+        X_val: pl.DataFrame | None = None,
+        y_val: np.ndarray | None = None,
     ) -> "BaseLearner":
         """
         Entraîne le base learner.
 
         Args:
-            X: DataFrame avec les colonnes brutes nécessaires à la modalité.
-            y: labels encodés [0..n_classes-1], shape (n,).
-            val_split: fraction du train à réserver pour validation
-                (utilisée par les deep learners pour l'early stopping).
-                Ignoré par les learners sklearn-style sans early stopping.
+            X_train: DataFrame d'entraînement avec colonnes brutes selon modalité.
+            y_train: labels encodés [0..n_classes-1], shape (len(X_train),).
+            X_val: DataFrame de validation (optionnel). Si fourni, utilisé par
+                les deep learners pour l'early stopping et le monitoring.
+                Les frozen learners ignorent cet argument.
+            y_val: labels de validation, shape (len(X_val),). Doit être fourni
+                si X_val l'est.
 
         Returns:
             self (chaînable).
 
         Raises:
-            ValueError: si X ne contient pas les colonnes attendues pour la modalité.
+            ValueError: si X_train ne contient pas les colonnes attendues,
+                ou si (X_val is None) XOR (y_val is None).
+
+        Convention sur le split (M.0) :
+            Le DataModule fournit en standard un split 80/20 stratifié seed=42
+            sur train_pool_effective. Le call-site typique :
+                X_train, y_train = dm.get_sklearn_data("train")
+                X_val,   y_val   = dm.get_sklearn_data("val")
+                learner.fit(X_train, y_train, X_val, y_val)
+            En notebook exploratoire, fit(X, y) reste valide grâce aux défauts
+            None ; les deep learners utilisent alors un fallback interne.
         """
 
     @abstractmethod
