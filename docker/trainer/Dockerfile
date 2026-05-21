@@ -1,6 +1,7 @@
 # Base : PyTorch officielle CUDA 12.1, Python 3.10
 # Versions à ajuster selon les évolutions de PyTorch / CUDA
-FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+# FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
 # === Métadonnées ===
 LABEL maintainer="GP"
