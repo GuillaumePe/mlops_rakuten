@@ -87,6 +87,10 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
     ):
         super().__init__()
         self.mode = mode
+        # Pour raw_for_finetune, text_model et image_model sont ignorés
+        if mode != "raw_for_finetune":
+            if text_model is None or image_model is None:
+                raise ValueError(f"text_model et image_model requis pour mode={mode}")
         self.text_model = text_model
         self.image_model = image_model
         self.cache_version = cache_version
@@ -99,10 +103,14 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self.exclude_gold = exclude_gold
 
         # Chemin du cache, déterministe à partir des modèles + version
-        self.cache_path = CACHE_DIR / (
-            f"embeddings_{slugify_model_name(text_model)}_"
-            f"{slugify_model_name(image_model)}_v{cache_version}.parquet"
-        )
+        # (n'existe pas pour raw_for_finetune)
+        if mode == "raw_for_finetune":
+            self.cache_path = None
+        else:
+            self.cache_path = CACHE_DIR / (
+                f"embeddings_{slugify_model_name(text_model)}_"
+                f"{slugify_model_name(image_model)}_v{cache_version}.parquet"
+            )
 
         # Placeholders remplis dans setup()
         self._df_full: pl.DataFrame | None = None
@@ -126,6 +134,10 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         Garantit que le cache contient embeddings + tabulaires pour tous les
         productid actuellement en base. Calcule uniquement les manquants.
         """
+        if self.mode == "raw_for_finetune":
+            logger.info("[DataModule] prepare_data() ignoré pour mode=raw_for_finetune")
+            return
+        
         if self.mode != "m2_embeddings":
             raise NotImplementedError(
                 f"prepare_data pour mode={self.mode} sera implémenté en Phase 1+"
@@ -255,6 +267,159 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         print(f"[DataModule] Cache écrit : {len(full_df)} embeddings → {self.cache_path}")
 
     # --- setup : load + split stratifié -----------------------------------
+    def _setup_raw_for_finetune(self):
+        """
+        M.5 — Charge les données BRUTES directement de MongoDB (pas de cache parquet).
+    
+        Utilisé pour l'entraînement des base learners (TextCNN, ResNet50PartialFT).
+    
+        Colonnes exposées :
+        - productid, imageid : pour identifier les samples
+        - text : designation + description merged
+        - label : classe cible
+        - batch_id, is_gold : metadata pour filtrage
+    
+        Split :
+        - train_pool : batches autorisés, gold exclu (tous les samples dispos)
+        - val_selection : ~10% mis de côté pour arbitrer @active
+        - train_pool_effective : train_pool - val_selection
+        - train / val : split 80/20 stratifié sur train_pool_effective
+        """
+        logger.info("[DataModule._setup_raw_for_finetune] Chargement données brutes Mongo...")
+    
+        client = MongoClient(MONGO_URI)
+        db = client[DB_NAME]
+    
+        # 1. Charger X_raw_data_batches (texte + metadata)
+        x_docs = list(db["X_raw_data_batches"].find(
+            {},
+            {
+                "_id": 0,
+                "productid": 1,
+                "imageid": 1,
+                "designation": 1,
+                "description": 1,
+                "batch_id": 1,
+                "is_gold": 1,
+            }
+        ))
+        if self.limit is not None:
+            x_docs = x_docs[:self.limit]
+    
+        logger.info(f"[DataModule._setup_raw_for_finetune] {len(x_docs)} docs chargés depuis X_raw")
+    
+        # 2. Charger Y_raw_data_batches (labels)
+        productid_list = [d["productid"] for d in x_docs]
+        y_docs = list(db["Y_raw_data_batches"].find(
+            {"productid": {"$in": productid_list}},
+            {"_id": 0, "productid": 1, "prdtypecode": 1}
+        ))
+    
+        labels_map = {d["productid"]: d["prdtypecode"] for d in y_docs}
+        all_codes = sorted(
+            set(d["prdtypecode"] for d in db["Y_raw_data_batches"].find({}, {"prdtypecode": 1, "_id": 0}))
+        )
+        self._code_to_idx = {code: idx for idx, code in enumerate(all_codes)}
+        self._idx_to_code = {idx: code for code, idx in self._code_to_idx.items()}
+    
+        # 3. Assembler en DataFrame Polars
+        data = {
+            "productid": [],
+            "imageid": [],
+            "text": [],
+            "label": [],
+            "batch_id": [],
+            "is_gold": [],
+        }
+    
+        for doc in x_docs:
+            pid = doc["productid"]
+            if pid not in labels_map:
+                # Sample sans label : skip
+                continue
+        
+            designation = doc.get("designation") or ""
+            description = doc.get("description") or ""
+            full_text = f"{designation}. {description}" if description else designation
+        
+            data["productid"].append(pid)
+            data["imageid"].append(doc["imageid"])
+            data["text"].append(clean_description(full_text))
+            data["label"].append(self._code_to_idx[labels_map[pid]])
+            data["batch_id"].append(doc.get("batch_id"))
+            data["is_gold"].append(doc.get("is_gold", False))
+    
+        self._df_full = pl.DataFrame(data)
+        logger.info(f"[DataModule._setup_raw_for_finetune] DataFrame assemblé : {len(self._df_full)} samples")
+    
+        # 4. Résoudre val_selection version
+        self._val_selection_version = get_active_val_selection_version()
+        val_sel_col = f"is_val_selection_v{self._val_selection_version}"
+    
+        # Pour raw_for_finetune, on ne peut pas utiliser le val_selection versionné
+        # (il n'existe que dans le cache parquet). Fallback : créer un val_selection ad-hoc
+        # 10% aléatoire stratifié sur les labels.
+        n_total = len(self._df_full)
+        idx = np.arange(n_total)
+        labels = self._df_full.get_column("label").to_numpy()
+    
+        idx_pool, idx_val_sel = train_test_split(
+            idx,
+            test_size=0.10,
+            stratify=labels,
+            random_state=self._random_state,
+        )
+    
+        # 5. Appliquer les masks
+        mask_pool = pl.col("batch_id").is_in(self.train_batches)
+        if self.exclude_gold:
+            mask_pool = mask_pool & (~pl.col("is_gold"))
+    
+        self._df_train_pool = self._df_full.filter(mask_pool)
+    
+        # val_selection : intersection de pool + idx_val_sel
+        val_sel_productids = set(self._df_full[idx_val_sel.tolist()]["productid"].to_list())
+        mask_val_selection = mask_pool & pl.col("productid").is_in(val_sel_productids)
+        self._df_val_selection = self._df_full.filter(mask_val_selection)
+    
+        # train_pool_effective : pool - val_selection
+        mask_pool_effective = mask_pool & (~pl.col("productid").is_in(val_sel_productids))
+        self._df_train_pool_effective = self._df_full.filter(mask_pool_effective)
+    
+        # 6. Split train/val standard 80/20 sur train_pool_effective
+        n_pool_eff = len(self._df_train_pool_effective)
+        labels_pool_eff = self._df_train_pool_effective.get_column("label").to_numpy()
+        indices_pool_eff = np.arange(n_pool_eff)
+    
+        idx_train, idx_val = train_test_split(
+            indices_pool_eff,
+            test_size=self.val_size,
+            stratify=labels_pool_eff,
+            random_state=self._random_state,
+        )
+    
+        self._df_train = self._df_train_pool_effective[idx_train.tolist()]
+        self._df_val = self._df_train_pool_effective[idx_val.tolist()]
+    
+        # 7. Exposer colonnes (raw_for_finetune n'a pas d'embeddings)
+        self._text_cols = []
+        self._image_cols = []
+        self._tabular_cols = []
+    
+        # Log summary
+        n_total = len(self._df_full)
+        n_pool = len(self._df_train_pool)
+        n_pool_eff = len(self._df_train_pool_effective)
+        n_val_sel = len(self._df_val_selection)
+        n_gold = len(self._df_full.filter(pl.col("is_gold")))
+    
+        logger.info(
+            f"[DataModule._setup_raw_for_finetune] "
+            f"Total={n_total} | train_pool={n_pool} | train_pool_effective={n_pool_eff} | "
+            f"val_selection≈10%={n_val_sel} | gold={n_gold} | "
+            f"train={len(self._df_train)} | val={len(self._df_val)}"
+        )
+
 
     def setup(self, stage: str | None = None):
         """
@@ -267,6 +432,10 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         Le split train/val interne (pour early stopping en M3, par exemple) est
         un split 90/10 du train_pool, utilisé par les DataLoaders Lightning.
         """
+        if self.mode == "raw_for_finetune":
+            self._setup_raw_for_finetune()
+            return
+    
         if self.mode not in ("m2_embeddings", "m2_benchmark"):
             raise NotImplementedError(f"setup pour mode={self.mode} non encore supporté")
 

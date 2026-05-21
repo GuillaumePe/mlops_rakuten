@@ -2,7 +2,7 @@
 # Usage: python -m src.experiments.runner --experiment base_learner_textcnn --action fit_base_learner
 
 datamodule:
-  mode: "base_learners"
+  mode: "raw_for_finetune"
   batch_size: 32
   num_workers: 4
   val_size: 0.10

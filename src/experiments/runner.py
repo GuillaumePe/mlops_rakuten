@@ -27,6 +27,7 @@ import yaml
 from src.experiments.datamodule.rakuten_datamodule import RakutenLightningDataModule
 from src.experiments.models.m2.m2 import M2Stacking
 from src.experiments.strategies.sklearn_experiment import SklearnExperiment
+from src.experiments.strategies.base_learner_experiment import BaseLearnerExperiment
 from src.models.assembled.m2_baseline import M2Baseline
 import os
 
@@ -170,7 +171,7 @@ def build_m2_baseline_experiment(config: dict) -> tuple[RakutenLightningDataModu
         tags=combined_tags,
     )
     return dm, experiment
-def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataModule, "BaseLearnerExperiment"]:
+def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataModule, BaseLearnerExperiment]:
     """
     M.5 — Assemble DataModule + BaseLearnerExperiment pour un base learner (TextCNN, ResNet50, etc.).
  
@@ -189,10 +190,10 @@ def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataMod
     ```
     """
     from src.experiments.strategies.base_learner_experiment import BaseLearnerExperiment
- 
+    print("[DEBUG] build_base_learner_experiment START")
     dm_cfg = config["datamodule"]
     dm = RakutenLightningDataModule(
-        mode=dm_cfg.get("mode", "base_learners"),
+        mode=dm_cfg.get("mode", "raw_for_finetune"),
         text_model=dm_cfg.get("text_model", None),
         image_model=dm_cfg.get("image_model", None),
         batch_size=dm_cfg.get("batch_size", 64),
@@ -203,15 +204,16 @@ def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataMod
         train_batches=dm_cfg.get("train_batches", [1]),
         exclude_gold=dm_cfg.get("exclude_gold", True),
     )
- 
+    print("[DEBUG] DataModule instantiated")
     learner_cfg = config["learner"]
+    print(f"[DEBUG] learner_cfg: {learner_cfg}")
     learner_name = learner_cfg["name"]
     learner_config = learner_cfg.get("config", {})
  
     mlflow_cfg = config["mlflow"]
     tracking_uri = mlflow_cfg.get("tracking_uri", "http://mlflow:5000")
     experiment_name = mlflow_cfg.get("experiment_name", "base_learners_phase1")
- 
+    print("[DEBUG] Creating BaseLearnerExperiment...")
     # Instancier BaseLearnerExperiment (Strategy pattern)
     experiment = BaseLearnerExperiment(
         learner_name=learner_name,
@@ -220,7 +222,7 @@ def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataMod
         experiment_name=experiment_name,
         data_folder=Path(dm_cfg.get("data_folder", "data/raw_data")),
     )
- 
+    print("[DEBUG] BaseLearnerExperiment instantiated")
     return dm, experiment
 
 # Registry des constructeurs par expérience.
@@ -540,7 +542,7 @@ def main():
     parser.add_argument(
         "--cloud-action",
         default=None,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner"],
         help="(submit_cloud only) Quelle action le pod cloud doit exécuter",
     )
     parser.add_argument(
