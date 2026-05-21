@@ -13,6 +13,13 @@ Cycle de vie standard :
 3. (optionnel) predict_proba(X) : probabilités softmax (n, n_classes), utilisé
    par StackingLGBM pour générer les meta-features OOF.
 
+Persistance (M.4bis) :
+4. save_pretrained(path) : sérialise tout l'état (state_dict + métadonnées Python)
+   pour que from_pretrained(path) puisse reconstruire un learner fonctionnellement
+   identique. API conçue pour s'intégrer avec mlflow.pyfunc.log_model via
+   src/models/base_learners/_pyfunc_wrapper.py::BaseLearnerPyfunc.
+5. from_pretrained(cls, path) : classmethod inverse exacte de save_pretrained.
+
 Stratégie de fit pour les deep base learners :
 - Single train/val split (80/20), early stopping patience configurable
 - Pas de K-Fold sur le deep (coût prohibitif) : la robustesse vient du K-Fold
@@ -23,6 +30,7 @@ Stratégie de fit pour les deep base learners :
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -166,7 +174,93 @@ class BaseLearner(ABC):
             "Utiliser extract_embeddings + un classifier externe (LogReg)."
         )
 
-    
+    # ------------------------------------------------------------------ #
+    # Persistance legacy (M.0) — concrète, NotImplementedError par défaut #
+    # ------------------------------------------------------------------ #
+
+    def save(self, path: str | Path) -> None:
+        """
+        [LEGACY M.0] Sérialise l'état du learner sur disque.
+
+        Non recommandé pour les nouveaux développements. Préférer
+        save_pretrained() qui est compatible PyFunc / MLflow registry.
+
+        Maintenu pour compat ascendante avec ResNet18Frozen / CamembertFrozen
+        qui ont peut-être leur propre format texte (cf. ResNet18Frozen.save).
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__}.save() non implémenté. "
+            "Utiliser save_pretrained() pour la nouvelle API PyFunc-compatible."
+        )
+
+    def load(self, path: str | Path) -> "BaseLearner":
+        """
+        [LEGACY M.0] Charge l'état depuis disque. Retourne self.
+
+        Inverse de save(). Non recommandé pour les nouveaux développements,
+        préférer from_pretrained() (classmethod).
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__}.load() non implémenté. "
+            "Utiliser from_pretrained() (classmethod) pour la nouvelle API."
+        )
+
+    # ------------------------------------------------------------------ #
+    # Persistance PyFunc-compatible (M.4bis) — interface uniforme         #
+    # ------------------------------------------------------------------ #
+
+    def save_pretrained(self, path: str | Path) -> None:
+        """
+        Sauvegarde le BaseLearner de façon réversible dans `path`.
+
+        Le dossier `path` doit contenir tout ce qui est nécessaire pour
+        reconstruire le learner via `from_pretrained(path)` sans accès
+        à un état Python pré-existant :
+        - state_dict des nn.Module (poids appris)
+        - métadonnées de prétraitement (vocab, transforms args, etc.)
+        - hyperparamètres de construction (config JSON)
+
+        Convention : `path` peut être un dossier MLflow artifact, un chemin
+        local, ou un mount cloud. L'implémentation ne fait AUCUNE hypothèse
+        sur la persistence externe (DVC, R2, S3) — c'est le rôle de
+        BaseLearnerExperiment.
+
+        Conçu pour être consommé par
+        src/models/base_learners/_pyfunc_wrapper.py::BaseLearnerPyfunc
+        qui implémente mlflow.pyfunc.PythonModel.
+
+        Raises:
+            NotImplementedError: par défaut. À implémenter dans toute classe
+                concrète dont le state est non-trivial (TextCNN, ResNet50PartialFT,
+                CamembertLoRA, ResNet18FullFT).
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__}.save_pretrained() non implémenté. "
+            "Voir docstring BaseLearner.save_pretrained pour le contrat."
+        )
+
+    @classmethod
+    def from_pretrained(cls, path: str | Path) -> "BaseLearner":
+        """
+        Reconstruit le BaseLearner depuis `path` (écrit par save_pretrained).
+
+        Le learner retourné est en mode eval (model.eval() côté nn.Module)
+        et prêt pour extract_embeddings / predict_proba. Pas de fit() nécessaire.
+
+        Inverse exact de save_pretrained : la composition
+        `from_pretrained(p) ∘ save_pretrained(p)` doit être l'identité
+        fonctionnelle (les embeddings produits sur la même entrée doivent
+        être bit-à-bit identiques aux embeddings d'avant save).
+
+        Raises:
+            NotImplementedError: par défaut. À implémenter dans toute classe
+                concrète dont le state est non-trivial.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__}.from_pretrained() non implémenté. "
+            "Voir docstring BaseLearner.from_pretrained pour le contrat."
+        )
+
     # ------------------------------------------------------------------ #
     # Utilitaires                                                         #
     # ------------------------------------------------------------------ #

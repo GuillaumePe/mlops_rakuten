@@ -484,4 +484,120 @@ class TextCNN(BaseLearner):
         """(n, 27) — softmax du classifier final."""
         return self._forward_in_batches(X, return_features=False)
 
+        # ------------------------------------------------------------------ #
+    # M.4bis — Persistance PyFunc-compatible                              #
+    # ------------------------------------------------------------------ #
+ 
+    def save_pretrained(self, path: str | Path) -> None:
+        """
+        Sauvegarde réversible du TextCNN dans `path`.
+ 
+        Crée 3 fichiers :
+        - net_state.pt   : state_dict du nn.Module (_TextCNNLightning)
+        - vocab.json     : dict {token: id} construit au fit() (CRITIQUE pour
+                           refaire la tokenisation à l'inférence)
+        - config.json    : hyperparamètres de construction (pour reconstruire
+                           la classe via from_pretrained)
+ 
+        Pré-condition : fit() doit avoir été appelé (sinon vocab=None et
+        net=None → ValueError explicite).
+ 
+        Justification :
+        - Le state_dict suffit pour les poids appris (Embedding, Conv1d, Linear).
+        - Le vocab N'EST PAS dans le state_dict — c'est un dict Python construit
+          au fit() à partir du corpus train. Sans lui, impossible de tokeniser
+          un nouveau texte → reload inutilisable. C'est l'invariant central.
+        """
+        if self.vocab is None or self.net is None:
+            raise RuntimeError(
+                "TextCNN.save_pretrained() appelé avant fit(). "
+                "vocab et net sont None — rien à sauvegarder."
+            )
+ 
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+ 
+        # 1. Poids du nn.Module Lightning
+        torch.save(self.net.state_dict(), path / "net_state.pt")
+ 
+        # 2. Vocab : critique, ne PAS perdre (tokenize impossible sinon)
+        with open(path / "vocab.json", "w", encoding="utf-8") as f:
+            json.dump(self.vocab, f, ensure_ascii=False)
+ 
+        # 3. Hyperparams de construction
+        #    On utilise vocab_size_cap (paramètre demandé) plutôt que
+        #    len(self.vocab) (taille réelle) — la vraie vocab_size effective
+        #    sera len(vocab) au reload.
+        config = {
+            "vocab_size": self._vocab_size_cap,
+            "max_len": self._max_len,
+            "embed_dim": self._embed_dim,
+            "n_filters": self._n_filters,
+            "kernel_sizes": list(self._kernel_sizes),  # tuple → list pour JSON
+            "n_classes": self._n_classes,
+            "dropout": self._dropout,
+            "batch_size": self._batch_size,
+            "max_epochs": self._max_epochs,
+            "patience": self._patience,
+            "lr": self._lr,
+            "weight_decay": self._weight_decay,
+            "text_col": self._text_col,
+            "random_state": self._random_state,
+            "precision": self._precision,
+        }
+        with open(path / "config.json", "w") as f:
+            json.dump(config, f, indent=2)
+ 
+    @classmethod
+    def from_pretrained(cls, path: str | Path) -> "TextCNN":
+        """
+        Reconstruit un TextCNN depuis un dossier écrit par save_pretrained.
+ 
+        Steps :
+        1. Lit config.json → instancie TextCNN avec hyperparams
+        2. Lit vocab.json → restaure self.vocab
+        3. Reconstruit self.net = _TextCNNLightning(vocab_size=len(vocab), ...)
+           ATTENTION : utiliser len(vocab) (taille effective) et pas
+           vocab_size_cap (paramètre demandé, qui peut être > len(vocab)
+           si le corpus a moins de tokens uniques).
+        4. Charge state_dict dans self.net
+        5. Met self.net en mode eval()
+ 
+        Le learner retourné est immédiatement utilisable pour
+        extract_embeddings / predict_proba (pas besoin de re-fit).
+        """
+        path = Path(path)
+ 
+        # 1. Lire config + restaurer types (tuple)
+        with open(path / "config.json") as f:
+            config = json.load(f)
+        config["kernel_sizes"] = tuple(config["kernel_sizes"])
+ 
+        # 2. Instancier TextCNN avec les hyperparams
+        instance = cls(**config)
+ 
+        # 3. Restaurer le vocab AVANT de reconstruire le nn.Module
+        #    (besoin de len(vocab) pour la taille de l'Embedding)
+        with open(path / "vocab.json", encoding="utf-8") as f:
+            instance.vocab = json.load(f)
+ 
+        # 4. Reconstruire _TextCNNLightning avec la vraie vocab_size effective
+        instance.net = _TextCNNLightning(
+            vocab_size=len(instance.vocab),
+            embed_dim=instance._embed_dim,
+            n_filters=instance._n_filters,
+            kernel_sizes=instance._kernel_sizes,
+            n_classes=instance._n_classes,
+            dropout=instance._dropout,
+            lr=instance._lr,
+            weight_decay=instance._weight_decay,
+        )
+ 
+        # 5. Charger les poids appris (map_location=cpu pour portabilité GPU↔CPU)
+        state = torch.load(path / "net_state.pt", map_location="cpu")
+        instance.net.load_state_dict(state)
+        instance.net.eval()
+ 
+        return instance
+
    

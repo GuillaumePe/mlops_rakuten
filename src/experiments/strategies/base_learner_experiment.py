@@ -1,44 +1,66 @@
 """
-M.4 — BaseLearnerExperiment : stratégie d'orchestration complète.
+M.4 + M.4bis — BaseLearnerExperiment : stratégie d'orchestration complète.
 
 Résume le cycle de vie d'un base learner (TextCNN, ResNet50PartialFT, etc.) :
   1. Setup DataModule + résolution ACTIVE_VAL_SELECTION_VERSION
   2. Fit du learner sur train (val interne pour early stopping)
   3. Eval sur val_selection → métrique d'arbitrage @active
-  4. Log model + tag modality + récup version MLflow
-  5. Extract embeddings sur train_pool, write cache parquet, DVC push
-  6. Promotion @active conditionnelle
-  7. Cascade @active_text / @active_image via refresh_modality_alias
+  4. Log model PyFunc + tag modality + récup version MLflow
+  5. Décision promotion @active conditionnelle
+  6. Si promu : (a) set alias @active (b) cascade @active_text/image
+                (c) extract embeddings + write cache parquet + DVC push
+
+INVARIANT M.4bis (séquençage critique) :
+  Le cache parquet est écrit UNIQUEMENT après promotion @active réussie.
+  Cela garantit que `embeddings_{name}_v{N}.parquet` contient toujours les
+  embeddings du modèle pointé par `rakuten-base-{name} @active`. Cet invariant
+  est vérifié par le guard-fou M.7 dans DataModule._load_base_learner_embeddings
+  qui compare `source_model_version` (dans le parquet) à `@active.version`
+  (en MLflow). Sans ce séquençage, un run non-promu écraserait le cache avec
+  des embeddings désynchronisés → RuntimeError au prochain `mode=m2_benchmark`.
+
+Persistence PyFunc (M.4bis) :
+  Au lieu de mlflow.sklearn.log_model (qui ne fonctionne pas pour les
+  BaseLearner deep contenant des nn.Module + état Python comme le vocab),
+  on utilise mlflow.pyfunc.log_model avec :
+    - BaseLearner.save_pretrained() → sauve state_dict + métadonnées
+    - BaseLearnerPyfunc → wrapper générique qui reconstruit via from_pretrained
+  Cf. src/models/base_learners/_pyfunc_wrapper.py pour le wrapper.
+
+Décomposition responsabilités :
+  - BaseLearner ABC : contrat du modèle (fit, extract_embeddings, predict_proba,
+                      save_pretrained, from_pretrained)
+  - BaseLearnerExperiment : orchestration expérience (data, train, eval, log,
+                            promote, cache parquet, DVC)
+  (Strategy pattern : composition, pas héritage)
 
 Usage typique (depuis runner.py M.5) :
     experiment = BaseLearnerExperiment(
         learner_name="textcnn",
-        config_dict={...},
+        config={...},
+        tracking_uri=...,
+        cache_output_dir=Path(os.getenv("DATA_ROOT", ".")) / "data/cache",
     )
     experiment.fit(datamodule)
-
-Décomposition responsabilités :
-  - BaseLearner ABC : contrat du modèle (fit, extract_embeddings, predict_proba)
-  - BaseLearnerExperiment : orchestration expérience (data, train, eval, log, promote)
-    (Strategy pattern : composition, pas héritage)
 """
 from __future__ import annotations
 
 import logging
 import os
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import mlflow
-import mlflow.sklearn
+import mlflow.pyfunc
 import numpy as np
-import pandas as pd
 import polars as pl
 from mlflow.tracking import MlflowClient
 from sklearn.metrics import f1_score
-from slugify import slugify
+
+from src.models.base_learners._pyfunc_wrapper import BaseLearnerPyfunc
 
 if TYPE_CHECKING:
     from src.experiments.datamodule.rakuten_datamodule import RakutenLightningDataModule
@@ -58,13 +80,14 @@ class BaseLearnerExperiment:
     """
     Orchestration complète d'un cycle d'entraînement de base learner.
 
-    Cette classe consumer un BaseLearner (via composition, pas héritage) et
+    Cette classe consume un BaseLearner (via composition, pas héritage) et
     gère tout ce qui entoure : DataModule, données, évaluation, MLflow,
     promotion alias, cache parquet, DVC.
 
     Responsabilités découpées :
-    - BaseLearner : apprendre à encoder (fit, extract_embeddings)
-    - BaseLearnerExperiment : orchestre l'expérimentation complet
+    - BaseLearner : apprendre à encoder (fit, extract_embeddings) + se
+                    sérialiser/reconstruire (save_pretrained, from_pretrained)
+    - BaseLearnerExperiment : orchestre l'expérimentation complète
     """
 
     def __init__(
@@ -80,14 +103,19 @@ class BaseLearnerExperiment:
         Args:
             learner_name: identifiant du base learner à entraîner
                 (ex: "textcnn", "resnet50_partial_ft").
-            config: dict de configuration du learner (ex: hyperparams,
+            config: dict de configuration du learner (hyperparams,
                 learning rate, batch size, etc.). Sera loggé en MLflow.
             tracking_uri: URI du serveur MLflow (default http://mlflow:5000).
+                Le runner override avec l'env var MLFLOW_TRACKING_URI pour les
+                pods cloud (Tailscale IP).
             experiment_name: nom de l'expérience MLflow.
             data_folder: racine des données (images, parquets). Par défaut,
-                déduit depuis env ou ../data/raw_data/.
+                "data/raw_data".
             cache_output_dir: dossier où écrire les caches parquets. Par défaut,
-                ./mlruns_cache.
+                "mlruns_cache" (à OVERRIDER côté runner avec un chemin sur le
+                volume persistant cloud, sinon le cache est perdu au cleanup
+                du pod). Recommandé :
+                    Path(os.getenv("DATA_ROOT", ".")) / "data/cache"
         """
         self.learner_name = learner_name
         self.config = config
@@ -101,10 +129,10 @@ class BaseLearnerExperiment:
         mlflow.set_tracking_uri(tracking_uri)
         mlflow.set_experiment(experiment_name)
 
-        self._learner: Optional[BaseLearner] = None
+        self._learner: Optional["BaseLearner"] = None
         self._run_id: Optional[str] = None
 
-    def _build_learner(self) -> BaseLearner:
+    def _build_learner(self) -> "BaseLearner":
         """
         Instancie le BaseLearner selon learner_name.
 
@@ -121,8 +149,8 @@ class BaseLearnerExperiment:
                 kernel_sizes=tuple(cfg.get("kernel_sizes", [1, 2, 3, 4, 5, 6])),
                 n_classes=27,
                 dropout=cfg.get("dropout", 0.5),
-                lr=cfg.get("lr", 1e-3),
-                weight_decay=cfg.get("weight_decay", 0.0),
+                lr=float(cfg.get("lr", 1e-3)),
+                weight_decay=float(cfg.get("weight_decay", 0.0)),
             ),
             "resnet50_partial_ft": lambda cfg: ResNet50PartialFT(
                 image_folder=str(self.data_folder / "images" / "image_train"),
@@ -130,9 +158,9 @@ class BaseLearnerExperiment:
                 batch_size=cfg.get("batch_size", 32),
                 max_epochs=cfg.get("max_epochs", 15),
                 patience=cfg.get("patience", 3),
-                lr_head=cfg.get("lr_head", 1e-3),
-                lr_backbone=cfg.get("lr_backbone", 1e-5),
-                weight_decay=cfg.get("weight_decay", 1e-4),
+                lr_head=float(cfg.get("lr_head", 1e-3)),
+                lr_backbone=float(cfg.get("lr_backbone", 1e-5)),
+                weight_decay=float(cfg.get("weight_decay", 1e-4)),
                 num_workers=cfg.get("num_workers", 4),
                 random_state=cfg.get("random_state", 42),
                 precision=cfg.get("precision", "bf16-mixed"),
@@ -151,40 +179,52 @@ class BaseLearnerExperiment:
         """
         Orchestre le cycle complet d'entraînement.
 
-        Étapes :
-        1. Setup DataModule
-        2. Récup splits train/val
-        3. Instancie + fit du learner
-        4. Éval sur val_selection → métrique @active
-        5. Log model + tag modality + récup version MLflow
-        6. Extract embeddings + write cache parquet
-        7. Promo @active conditionnelle
-        8. Cascade @active_text / @active_image
+        Séquence M.4bis (invariant @active ↔ parquet) :
+            1. Setup DataModule (skip si déjà setupé)
+            2. Récup splits train/val standard
+            3. Fit du learner avec MLflow run open
+            4. Eval sur val_selection (arbitre @active)
+            5. Log PyFunc model + tag modality + récup version
+            6. Décision promotion (compute_promotion_decision)
+            7. Si promu :
+               a. Set alias @active
+               b. Cascade @active_text/@active_image
+               c. Extract embeddings + write cache parquet + DVC push
+               Sinon : log skip, parquet conservé tel quel (correspond à
+                       @active actuel)
 
         Args:
-            datamodule: RakutenLightningDataModule configuré (pas encore setupé).
+            datamodule: RakutenLightningDataModule configuré.
         """
         logger.info(f"[BaseLearnerExperiment] Démarrage fit pour {self.learner_name}")
         start_time = time.time()
 
-        # 1. Setup DataModule
+        # ============================================================== #
+        # 1. Setup DataModule (idempotent)                                 #
+        # ============================================================== #
         logger.info("[BaseLearnerExperiment.1] Setup DataModule")
-        datamodule.setup()
+        if getattr(datamodule, "_df_full", None) is None:
+            datamodule.setup()
+        else:
+            logger.info("  DataModule déjà setupé, skip")
         n_val_selection = get_active_val_selection_version()
         logger.info(f"  ACTIVE_VAL_SELECTION_VERSION={n_val_selection}")
 
+        # ============================================================== #
         # 2. Récup splits train/val (standard 80/20 sur train_pool_effective)
-        logger.info("[BaseLearnerExperiment.2] Récup splits")
-        X_train, y_train = datamodule.get_sklearn_data(
-            "train", include_raw=True
-        )
+        # ============================================================== #
+        logger.info("[BaseLearnerExperiment.2] Récup splits train/val")
+        X_train, y_train = datamodule.get_sklearn_data("train", include_raw=True)
         X_val, y_val = datamodule.get_sklearn_data("val", include_raw=True)
         logger.info(f"  train: {len(X_train)}, val: {len(X_val)}")
 
-        # 3. Instancie + fit learner
+        # ============================================================== #
+        # 3. Instancie + fit learner (dans un run MLflow)                 #
+        # ============================================================== #
         logger.info("[BaseLearnerExperiment.3] Instancie + fit learner")
         self._learner = self._build_learner()
         logger.info(f"  Learner : {self._learner}")
+
         with mlflow.start_run() as run:
             self._run_id = run.info.run_id
             logger.info(f"  MLflow run_id={self._run_id}")
@@ -201,11 +241,13 @@ class BaseLearnerExperiment:
             logger.info(f"  Fit terminé en {fit_duration_s:.1f}s")
             mlflow.log_metric("fit_duration_s", fit_duration_s)
 
-            # 4. Éval sur val_selection (arbitre @active)
-            logger.info(f"[BaseLearnerExperiment.4] Éval sur val_selection_v{n_val_selection}")
-            X_vs, y_vs = datamodule.get_sklearn_data(
-                "val_selection", include_raw=True
+            # ========================================================== #
+            # 4. Eval sur val_selection (arbitre @active)                  #
+            # ========================================================== #
+            logger.info(
+                f"[BaseLearnerExperiment.4] Eval sur val_selection_v{n_val_selection}"
             )
+            X_vs, y_vs = datamodule.get_sklearn_data("val_selection", include_raw=True)
             if len(X_vs) == 0:
                 logger.error(
                     f"val_selection vide ! Vérifier is_val_selection_v{n_val_selection}"
@@ -222,14 +264,37 @@ class BaseLearnerExperiment:
             mlflow.log_metric(metric_key, f1_vs)
             logger.info(f"  {metric_key}={f1_vs:.4f}")
 
-            # 5. Log model MLflow + tag modality (AVANT cache, besoin de la version)
-            logger.info("[BaseLearnerExperiment.5] Log model MLflow + tag")
+            # ========================================================== #
+            # 5. Log PyFunc model + tag modality + récup version          #
+            # ========================================================== #
+            logger.info("[BaseLearnerExperiment.5] Log PyFunc model + tag modality")
             registered_model_name = f"rakuten-base-{self.learner_name}"
-            mlflow.sklearn.log_model(
-                self._learner,
-                artifact_path="model",
-                registered_model_name=registered_model_name,
+
+            # Path complet de la classe pour reconstruction dynamique
+            learner_class_path = (
+                f"{self._learner.__class__.__module__}."
+                f"{self._learner.__class__.__name__}"
             )
+
+            # Sauve les artefacts du learner dans un tmpdir, puis log_model
+            # déplace tout vers le store MLflow.
+            with tempfile.TemporaryDirectory() as tmp:
+                learner_dir = Path(tmp) / "learner"
+                self._learner.save_pretrained(learner_dir)
+                logger.info(
+                    f"  save_pretrained → {learner_dir} : "
+                    f"{[p.name for p in learner_dir.iterdir()]}"
+                )
+
+                mlflow.pyfunc.log_model(
+                    artifact_path="model",
+                    python_model=BaseLearnerPyfunc(
+                        learner_class_path=learner_class_path
+                    ),
+                    artifacts={"learner_dir": str(learner_dir)},
+                    registered_model_name=registered_model_name,
+                )
+
             client = MlflowClient(self.tracking_uri)
             client.set_registered_model_tag(
                 registered_model_name,
@@ -238,42 +303,57 @@ class BaseLearnerExperiment:
             )
             logger.info(f"  Logged : {registered_model_name}")
 
-            # Récup la version du modèle qui vient de être logé
+            # Récup la version du modèle qui vient d'être loggé
             versions = client.search_model_versions(
                 f"name='{registered_model_name}'"
             )
             latest_version = max(int(v.version) for v in versions)
+            logger.info(f"  Version loggée : v{latest_version}")
 
-            # 6. Extract embeddings sur train_pool, write cache parquet
-            logger.info("[BaseLearnerExperiment.6] Extract embeddings + cache parquet")
-            self._write_cache_parquet(datamodule, source_model_version=latest_version)
-
-            # 7. Promo @active conditionnelle
-            logger.info("[BaseLearnerExperiment.7] Promo @active conditionnelle")
+            # ========================================================== #
+            # 6. Décision promotion @active (AVANT cache parquet !)        #
+            # ========================================================== #
+            logger.info("[BaseLearnerExperiment.6] Décision promotion @active")
             threshold = self.config.get("promotion_threshold", 0.005)
             should_promote = compute_promotion_decision(
                 registered_model_name, self._run_id, threshold=threshold
             )
             mlflow.log_param("promote_to_active", should_promote)
+
+            # ========================================================== #
+            # 7. Si promu : alias @active + cascade + write parquet        #
+            # ========================================================== #
             if should_promote:
+                # 7a. Set alias @active
                 client.set_registered_model_alias(
                     registered_model_name, "active", latest_version
                 )
-                logger.info(f"  Promu @active : v{latest_version}")
+                logger.info(f"[BaseLearnerExperiment.7a] Promu @active : v{latest_version}")
 
-                # 8. Cascade @active_text / @active_image
-                logger.info(
-                    "[BaseLearnerExperiment.8] Cascade @active_text/image"
-                )
+                # 7b. Cascade @active_text / @active_image
+                logger.info("[BaseLearnerExperiment.7b] Cascade @active_text/image")
                 refresh_modality_alias(self._learner.modality)
+
+                # 7c. Write cache parquet (UNIQUEMENT si promu — invariant M.4bis)
+                logger.info(
+                    "[BaseLearnerExperiment.7c] Extract embeddings + write cache parquet "
+                    "(promu → invariant @active ↔ parquet)"
+                )
+                self._write_cache_parquet(
+                    datamodule, source_model_version=latest_version
+                )
             else:
-                logger.info(f"  Pas promu (delta < {threshold})")
+                logger.info(
+                    f"[BaseLearnerExperiment.7] Non promu (gain < {threshold}). "
+                    f"Cache parquet conservé tel quel (correspond à @active actuel)."
+                )
 
             total_duration_s = time.time() - start_time
             mlflow.log_metric("total_duration_s", total_duration_s)
 
         logger.info(
-            f"[BaseLearnerExperiment] Fit terminé en {total_duration_s:.1f}s"
+            f"[BaseLearnerExperiment] Fit terminé en {total_duration_s:.1f}s "
+            f"(promoted={should_promote})"
         )
 
     def _write_cache_parquet(
@@ -283,41 +363,37 @@ class BaseLearnerExperiment:
     ) -> None:
         """
         Extract embeddings sur train_pool, construit un cache parquet
-        avec les colonnes métadonnées et features, puis DVC push.
+        avec colonnes métadonnées + features, puis DVC push.
 
         Cache layout :
             productid, batch_id, is_gold, is_val_selection_v1..v_max,
             source_model_name, source_model_version,
-            {learner_name}_feat_0, {learner_name}_feat_1, ..., {learner_name}_feat_{embed_dim-1}
+            {learner_name}_feat_0, ..., {learner_name}_feat_{embed_dim-1}
+
+        Filename (cohérence avec DataModule._load_base_learner_embeddings) :
+            embeddings_{learner_name}_v{ACTIVE_VAL_SELECTION_VERSION}.parquet
 
         Args:
-            datamodule: RakutenLightningDataModule.
-            source_model_version: version du modèle logé en MLflow. Si None, fallback 1.
+            datamodule: RakutenLightningDataModule (setupé).
+            source_model_version: version MLflow @active (REQUIS pour guard-fou M.7).
 
         NOTE — FIXME 2 (limitation MVP) :
             Actuellement on extract embeddings sur train_pool seulement.
             En prod, il faudrait couvrir _df_full (train + gold + future).
-            Solution : ajouter datamodule.get_full_data() en M.7, et appeler
-            datamodule.get_full_data(include_raw=True) au lieu de
-            datamodule.get_sklearn_data("train_pool", ...).
+            Solution future : ajouter datamodule.get_full_data(include_raw=True).
             Impact : M2Benchmark (M.9) réutilisera ces embeddings et doit avoir
             tous les productids du parquet, y compris gold.
         """
         logger.info("[_write_cache_parquet] Début extract embeddings")
 
-        # Récup _df_full (toutes les données : train+gold+future)
         df_full = datamodule._df_full
         if df_full is None:
             raise RuntimeError(
-                "_df_full not found. DataModule.setup() doit avoir charge parquet."
+                "_df_full non chargé. DataModule.setup() doit avoir été appelé."
             )
 
-        # Extract embeddings
-        # FIXME 2 : on prend train_pool au lieu de _df_full (limitation MVP)
-        X_full, _ = datamodule.get_sklearn_data(
-            "train_pool", include_raw=True
-        )
-
+        # Extract embeddings sur train_pool (cf. FIXME 2)
+        X_full, _ = datamodule.get_sklearn_data("train_pool", include_raw=True)
         logger.info(f"  Extract embeddings sur {len(X_full)} samples")
         embeddings = self._learner.extract_embeddings(X_full)
         logger.info(f"  Shape embeddings : {embeddings.shape}")
@@ -325,37 +401,50 @@ class BaseLearnerExperiment:
         # Construire le cache DataFrame
         cache_data = {
             "productid": X_full["productid"].to_numpy(),
-            "batch_id": X_full.get_column("batch_id").to_numpy()
-            if "batch_id" in X_full.columns
-            else np.full(len(X_full), 1, dtype=int),
+            "batch_id": (
+                X_full.get_column("batch_id").to_numpy()
+                if "batch_id" in X_full.columns
+                else np.full(len(X_full), 1, dtype=int)
+            ),
             "source_model_name": self.learner_name,
             "source_model_version": source_model_version or 1,
         }
 
         # Ajouter colonnes is_val_selection_v1..v_max (depuis df_full)
-        for col in df_full.columns:
-            if col.startswith("is_val_selection_v"):
-                cache_data[col] = df_full[col].to_numpy()
+        # Important : ces colonnes sont indexées par productid dans df_full,
+        # il faut un join pour récupérer seulement les rows de train_pool.
+        train_pool_pids = set(X_full["productid"].to_list())
+        df_meta = df_full.filter(pl.col("productid").is_in(train_pool_pids))
+        # Aligner sur l'ordre de X_full pour éviter les désordres
+        df_meta = df_meta.join(
+            pl.DataFrame({"productid": X_full["productid"].to_list(),
+                          "_order": list(range(len(X_full)))}),
+            on="productid",
+            how="inner",
+        ).sort("_order")
 
-        # Ajouter colonnes is_gold (important pour le garde-fou)
-        if "is_gold" in df_full.columns:
-            cache_data["is_gold"] = df_full["is_gold"].to_numpy()
+        for col in df_meta.columns:
+            if col.startswith("is_val_selection_v"):
+                cache_data[col] = df_meta[col].to_numpy()
+        if "is_gold" in df_meta.columns:
+            cache_data["is_gold"] = df_meta["is_gold"].to_numpy()
 
         # Ajouter embeddings
         for i in range(embeddings.shape[1]):
             cache_data[f"{self.learner_name}_feat_{i}"] = embeddings[:, i]
 
-        # Construire le DataFrame cache
-        cache_df = pd.DataFrame(cache_data)
+        cache_df = pl.DataFrame(cache_data)
         logger.info(f"  Cache shape : {cache_df.shape}")
 
-        # Write parquet
+        # Write parquet — filename SANS slugify (cohérence avec
+        # DataModule._load_base_learner_embeddings qui attend le learner_name brut)
         cache_filename = (
-            f"embeddings_{slugify(self.learner_name)}_v{get_active_val_selection_version()}.parquet"
+            f"embeddings_{self.learner_name}_"
+            f"v{get_active_val_selection_version()}.parquet"
         )
         cache_path = self.cache_output_dir / cache_filename
-        cache_df.to_parquet(cache_path, index=False)
-        logger.info(f"  Écrit cache : {cache_path}")
+        cache_df.write_parquet(cache_path)
+        logger.info(f"  Cache écrit : {cache_path}")
 
         # DVC push (optionnel, warning si pas dispo)
         try:
@@ -373,7 +462,7 @@ class BaseLearnerExperiment:
                 capture_output=True,
                 timeout=60,
             )
-            logger.info(f"  DVC push OK")
+            logger.info("  DVC push OK")
         except Exception as e:
             logger.warning(f"  DVC push échoué (optionnel) : {e}")
 

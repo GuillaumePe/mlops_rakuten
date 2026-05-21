@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
-
+import json
 import lightning as L
 import numpy as np
 import polars as pl
@@ -464,3 +464,138 @@ class ResNet50PartialFT(BaseLearner):
     def predict_proba(self, X: pl.DataFrame) -> np.ndarray:
         """(n, 27) — softmax du forward complet."""
         return self._forward_in_batches(X, return_features=False)
+        # ------------------------------------------------------------------ #
+    # M.4bis — Persistance PyFunc-compatible                              #
+    # ------------------------------------------------------------------ #
+ 
+    def save_pretrained(self, path: str | Path) -> None:
+        """
+        Sauvegarde réversible du ResNet50PartialFT dans `path`.
+ 
+        Crée 2 fichiers :
+        - net_state.pt   : state_dict du nn.Module (_ResNet50PartialFTLightning),
+                           contient TOUS les poids (gelés inclus) car nn.Module.state_dict()
+                           ne distingue pas requires_grad=True/False — il sauve l'état
+                           paramétrique complet.
+        - config.json    : hyperparamètres de construction.
+ 
+        Subtilités :
+        - image_folder est sauvé mais doit être OVERRIDABLE au reload (le chemin
+          train != chemin inference, ex: /workspace/data au pod, /mnt/disk au dashboard).
+        - train_transform / eval_transform NON sauvegardés (callables torchvision
+          non-JSON-serializables). On assume les défauts au reload. Si l'utilisateur
+          a fourni des transforms custom, il devra les re-fournir au constructeur
+          après from_pretrained, ou via une surcharge ad hoc.
+        - Le contrat from_pretrained → extract_embeddings est testé par sanity
+          check round-trip (diff embeddings < 1e-5).
+ 
+        Pré-condition : fit() doit avoir été appelé (sinon net=None → ValueError).
+        """
+        if self.net is None:
+            raise RuntimeError(
+                "ResNet50PartialFT.save_pretrained() appelé avant fit(). "
+                "net est None — rien à sauvegarder."
+            )
+ 
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+ 
+        # 1. state_dict du nn.Module (tous les poids, gelés inclus)
+        torch.save(self.net.state_dict(), path / "net_state.pt")
+ 
+        # 2. Hyperparams de construction
+        #    Note : on flag que les transforms sont les défauts au save.
+        #    Si l'utilisateur veut des transforms custom au reload, il doit
+        #    passer train_transform/eval_transform après from_pretrained.
+        custom_train = self._train_transform is not _default_train_transform()
+        custom_eval = self._eval_transform is not _default_eval_transform()
+ 
+        config = {
+            "image_folder": str(self._image_folder),
+            "n_classes": self._n_classes,
+            "batch_size": self._batch_size,
+            "max_epochs": self._max_epochs,
+            "patience": self._patience,
+            "lr_head": self._lr_head,
+            "lr_backbone": self._lr_backbone,
+            "weight_decay": self._weight_decay,
+            "num_workers": self._num_workers,
+            "random_state": self._random_state,
+            "precision": self._precision,
+            # Flags transforms : info-only, pas exploité au reload
+            "_uses_default_train_transform": not custom_train,
+            "_uses_default_eval_transform": not custom_eval,
+        }
+        with open(path / "config.json", "w") as f:
+            json.dump(config, f, indent=2)
+ 
+    @classmethod
+    def from_pretrained(
+        cls,
+        path: str | Path,
+        image_folder: str | Path | None = None,
+    ) -> "ResNet50PartialFT":
+        """
+        Reconstruit un ResNet50PartialFT depuis un dossier écrit par save_pretrained.
+ 
+        Args:
+            path: dossier écrit par save_pretrained, contient
+                net_state.pt + config.json.
+            image_folder: override du image_folder sauvegardé. CRITIQUE en prod
+                car le chemin local au moment du train (ex: /workspace/data/...)
+                diffère du chemin à l'inférence (ex: /mnt/disk/..., ou volume
+                cloud monté autrement). Si None, le chemin sauvegardé est utilisé
+                tel quel — vraisemblablement invalide hors du contexte de train.
+ 
+        Steps :
+        1. Lit config.json
+        2. Override image_folder si fourni
+        3. Instancie ResNet50PartialFT(...) → re-crée transforms par défaut
+        4. Instancie self.net = _ResNet50PartialFTLightning(...) → re-charge
+           backbone ResNet50 IMAGENET1K_V2 + override tête fc → 27 classes
+        5. Charge state_dict (qui écrase les poids ImageNet par les poids appris)
+        6. self.net.eval()
+ 
+        Le learner retourné est immédiatement utilisable pour
+        extract_embeddings / predict_proba.
+        """
+        path = Path(path)
+ 
+        # 1. Lire config
+        with open(path / "config.json") as f:
+            config = json.load(f)
+ 
+        # Nettoyer les flags purement informatifs (ne sont pas des params __init__)
+        config.pop("_uses_default_train_transform", None)
+        config.pop("_uses_default_eval_transform", None)
+ 
+        # 2. Override image_folder si fourni (cas inference cloud / dashboard)
+        if image_folder is not None:
+            config["image_folder"] = str(image_folder)
+ 
+        # 3. Instancier le wrapper (les transforms par défaut sont reconstruits
+        #    par le constructeur via _default_*_transform() — alignement
+        #    benchmark Rakuten garanti)
+        instance = cls(**config)
+ 
+        # 4. Reconstruire le _ResNet50PartialFTLightning :
+        #    a. Charge backbone ResNet50 IMAGENET1K_V2 (poids ImageNet)
+        #    b. Remplace fc → Linear(2048, n_classes)
+        #    Ces poids ImageNet seront immédiatement écrasés par notre state_dict
+        #    appris à l'étape 5, mais cette étape est nécessaire pour avoir la
+        #    bonne architecture (notamment la tête fc adaptée).
+        instance.net = _ResNet50PartialFTLightning(
+            n_classes=instance._n_classes,
+            lr_head=instance._lr_head,
+            lr_backbone=instance._lr_backbone,
+            weight_decay=instance._weight_decay,
+        )
+ 
+        # 5. Charger les poids appris (map_location=cpu pour portabilité GPU↔CPU)
+        state = torch.load(path / "net_state.pt", map_location="cpu")
+        instance.net.load_state_dict(state)
+        instance.net.eval()
+ 
+        return instance
+
+    
