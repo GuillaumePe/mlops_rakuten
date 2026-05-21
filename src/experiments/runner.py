@@ -211,7 +211,12 @@ def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataMod
     learner_config = learner_cfg.get("config", {})
  
     mlflow_cfg = config["mlflow"]
-    tracking_uri = mlflow_cfg.get("tracking_uri", "http://mlflow:5000")
+    # Priorité : env var (set par submit_cloud) > CLI > config YAML > default
+    tracking_uri = (
+        os.getenv("MLFLOW_TRACKING_URI")
+        or mlflow_cfg.get("tracking_uri")
+        or "http://mlflow:5000"
+    )
     experiment_name = mlflow_cfg.get("experiment_name", "base_learners_phase1")
     print("[DEBUG] Creating BaseLearnerExperiment...")
     # Instancier BaseLearnerExperiment (Strategy pattern)

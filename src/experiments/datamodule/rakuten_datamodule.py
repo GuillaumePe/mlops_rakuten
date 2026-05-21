@@ -367,7 +367,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             idx,
             test_size=0.10,
             stratify=labels,
-            random_state=self._random_state,
+            random_state=self.random_state,
         )
     
         # 5. Appliquer les masks
@@ -395,7 +395,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             indices_pool_eff,
             test_size=self.val_size,
             stratify=labels_pool_eff,
-            random_state=self._random_state,
+            random_state=self.random_state,
         )
     
         self._df_train = self._df_train_pool_effective[idx_train.tolist()]
