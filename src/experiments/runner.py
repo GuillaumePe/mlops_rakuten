@@ -189,7 +189,6 @@ def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataMod
       ...
     ```
     """
-    from src.experiments.strategies.base_learner_experiment import BaseLearnerExperiment
     print("[DEBUG] build_base_learner_experiment START")
     dm_cfg = config["datamodule"]
     dm = RakutenLightningDataModule(
@@ -226,6 +225,7 @@ def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataMod
         tracking_uri=tracking_uri,
         experiment_name=experiment_name,
         data_folder=Path(dm_cfg.get("data_folder", "data/raw_data")),
+        cache_output_dir=Path(os.getenv("DATA_ROOT", ".")) / "data/cache",
     )
     print("[DEBUG] BaseLearnerExperiment instantiated")
     return dm, experiment
@@ -553,7 +553,7 @@ def main():
     parser.add_argument(
         "--gpu-types",
         nargs="+",
-        default=["rtx_4090", "rtx_3090", "rtx_4080", "rtx_a5000", "rtx_a6000","rtx_a4000", "a40", "l40", "l40s", "a100_40gb","rtx_pro_4500"],
+        default=["rtx_5090","rtx_4090", "rtx_3090", "rtx_4080", "rtx_a5000", "rtx_a6000","rtx_a4000", "a40", "l40", "l40s", "a100_40gb","rtx_pro_4500"],
         help="(submit_cloud) Liste de GPUs à essayer en cascade (du préféré au fallback)",
 )
     parser.add_argument(

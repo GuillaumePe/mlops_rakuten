@@ -37,7 +37,7 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 from typing import Literal
-
+import math
 import json
 import lightning as L
 import numpy as np
@@ -142,7 +142,7 @@ class _TextCNNLightning(L.LightningModule):
         weight_decay: float = 0.0,
     ):
         super().__init__()
-        self.save_hyperparameters()
+#        self.save_hyperparameters()
 
         # Embedding : padding_idx=0 → gradient nul sur <PAD>, n'apprend pas
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
@@ -218,9 +218,42 @@ class _TextCNNLightning(L.LightningModule):
         self._val_labels.clear()
 
     def configure_optimizers(self):
-        return torch.optim.Adam(
-            self.parameters(), lr=self.lr, weight_decay=self.weight_decay
+		# M.1a : AdamW + warmup linéaire + cosine decay sur lr_head.
+        #
+        # Justification mathématique :
+        # - AdamW : découplage weight_decay du gradient (Loshchilov & Hutter 2019).
+        #   Adam classique applique le weight decay via le gradient normalisé
+        #   → sous-régularise les poids à grand gradient. AdamW le découple.
+        # - Warmup : à l'init, Adam sous-estime v_t (second moment) → updates
+        #   trop grands. Warmup linéaire sur 10% des steps laisse v_t se
+        #   stabiliser avant d'appliquer lr_max. (Goyal et al. 2017)
+        # - Cosine decay : lr(t) = 0.5 * lr_max * (1 + cos(π*t/T_max))
+        #   Converge vers flat minimum (Hochreiter & Schmidhuber 1997) vs
+        #   sharp minimum avec lr fixe → meilleure généralisation.
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
         )
+        # estimated_stepping_batches = steps total sur toute la durée du training
+        # (max_epochs * steps_per_epoch). Disponible après que le Trainer a
+        # été attaché au module (appelé dans configure_optimizers() = après setup).
+        total_steps = self.trainer.estimated_stepping_batches
+        warmup_steps = max(1, int(0.1 * total_steps))
+
+        def lr_lambda(current_step: int) -> float:
+            if current_step < warmup_steps:
+                return float(current_step) / float(max(1, warmup_steps))
+            progress = float(current_step - warmup_steps) / float(
+                max(1, total_steps - warmup_steps)
+            )
+            return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+        }
 
 
 # ====================================================================== #
@@ -345,6 +378,7 @@ class TextCNN(BaseLearner):
         y_train: np.ndarray,
         X_val: pl.DataFrame | None = None,
         y_val: np.ndarray | None = None,
+        **kwargs,
     ) -> "TextCNN":
         """
         Entraîne le TextCNN avec early stopping interne.
@@ -358,6 +392,14 @@ class TextCNN(BaseLearner):
         2. Build vocab top-K=50k UNIQUEMENT sur X_train (anti-fuite val→vocab)
         3. Tokenize X_train et X_val
         4. Fit Lightning avec early stopping sur val_f1_weighted
+        
+        kwargs reconnus (convention M.0a) :
+            lightning_logger: pl.loggers.Logger | None
+            Si fourni, utilisé par L.Trainer pour logger les métriques par
+            epoch (train_loss, val_loss, val_f1_weighted, ...) vers MLflow
+            ou autre backend. Sinon, logger=False (pas de logging par epoch).
+            Permet à BaseLearnerExperiment de partager son run MLflow actif
+            avec le Trainer Lightning interne.
         """
         if (X_val is None) != (y_val is None):
             raise ValueError(
@@ -420,19 +462,27 @@ class TextCNN(BaseLearner):
         # Trainer
         callbacks = [
             EarlyStopping(
-                monitor="val_f1_weighted",
-                mode="max",
+#                monitor="val_loss",
+#                mode="min",
+                 monitor="val_f1_weighted"
+                 mode="max",
                 patience=self._patience,
                 verbose=True,
             ),
-        ]
+        ]monitor="val_f1_weighted", mode="max"
+        # M.1a : gradient clipping pour stabiliser les updates sur embedding
+        # (init aléatoire → gradients potentiellement larges au début)
+
+        lightning_logger = kwargs.get("lightning_logger", None)
         trainer = L.Trainer(
             max_epochs=self._max_epochs,
             callbacks=callbacks,
             precision=self._precision,
             enable_checkpointing=False,
-            logger=False,
+            logger=lightning_logger if lightning_logger is not None else False,
             log_every_n_steps=50,
+            gradient_clip_val=1.0,
+
         )
         trainer.fit(self.net, train_loader, val_loader)
 

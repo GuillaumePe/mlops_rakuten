@@ -58,10 +58,10 @@ import mlflow.pyfunc
 import numpy as np
 import polars as pl
 from mlflow.tracking import MlflowClient
-from sklearn.metrics import f1_score
-
+from sklearn.metrics import accuracy_score, f1_score, log_loss
+from lightning.pytorch.loggers import MLFlowLogger
 from src.models.base_learners._pyfunc_wrapper import BaseLearnerPyfunc
-
+from src.experiments.strategies._metrics import expected_calibration_error
 if TYPE_CHECKING:
     from src.experiments.datamodule.rakuten_datamodule import RakutenLightningDataModule
     from src.models.base_learners._base import BaseLearner
@@ -236,7 +236,22 @@ class BaseLearnerExperiment:
 
             # Fit
             fit_start = time.time()
-            self._learner.fit(X_train, y_train, X_val, y_val)
+            lightning_logger = MLFlowLogger(
+				experiment_name=self.experiment_name,
+                tracking_uri=self.tracking_uri,
+                run_id=self._run_id,
+            )
+            logger.info(
+                f"  MLFlowLogger initialisé, run_id partagé={self._run_id}"
+            )
+
+            self._learner.fit(
+                X_train,
+                y_train,
+                X_val,
+                y_val,
+                lightning_logger=lightning_logger,
+            )
             fit_duration_s = time.time() - fit_start
             logger.info(f"  Fit terminé en {fit_duration_s:.1f}s")
             mlflow.log_metric("fit_duration_s", fit_duration_s)
@@ -256,13 +271,67 @@ class BaseLearnerExperiment:
                     f"val_selection_v{n_val_selection} est vide. "
                     f"Lancer src/data/init_val_selection.py --version {n_val_selection}"
                 )
-
             y_pred_proba = self._learner.predict_proba(X_vs)
             y_pred = y_pred_proba.argmax(axis=1)
-            f1_vs = f1_score(y_vs, y_pred, average="weighted")
-            metric_key = f"val_selection_v{n_val_selection}/f1_weighted"
-            mlflow.log_metric(metric_key, f1_vs)
-            logger.info(f"  {metric_key}={f1_vs:.4f}")
+            # ---------------------------------------------------------- #
+            # M.0d : métriques étendues sur val_selection                #
+            # ---------------------------------------------------------- #
+            # Métriques scalaires loggées en MLflow pour comparaison entre runs.
+            # Justification statistique de chaque métrique :
+            #
+            # - f1_weighted : métrique principale Rakuten (déséquilibre 27 classes).
+            #     Pondération par support de classe → respecte la distribution.
+            # - f1_macro : F1 non pondéré, sensible aux classes minoritaires.
+            #     Gap (f1_weighted - f1_macro) signale un biais sur les rares.
+            # - accuracy : repère intuitif, mais trompeur sur multi-classe déséquilibré.
+            # - log_loss : NLL = MLE catégorielle. Mesure la calibration + justesse.
+            #     log_loss faible = probas bien étalonnées ET prédictions justes.
+            # - ECE : Expected Calibration Error (Naeini et al. 2015).
+            #     Mesure pure de calibration, indépendante de l'accuracy.
+            #     ECE ≤ 0.02 = excellent, ≤ 0.05 = acceptable, > 0.1 = problème.
+            #
+            # Tous loggés avec préfixe `val_selection_v{n}/` pour respecter la
+            # convention de namespacing déjà en place pour f1_weighted.
+            
+            n_classes = int(max(y_vs.max() + 1, y_pred_proba.shape[1]))
+            f1_w = f1_score(y_vs, y_pred, average="weighted")
+            f1_m = f1_score(y_vs, y_pred, average="macro")
+            acc = accuracy_score(y_vs, y_pred)
+            ll = log_loss(y_vs, y_pred_proba, labels=list(range(n_classes)))
+            ece = expected_calibration_error(y_vs, y_pred_proba, n_bins=10)
+
+            prefix = f"val_selection_v{n_val_selection}"
+            mlflow.log_metric(f"{prefix}/f1_weighted", f1_w)
+            mlflow.log_metric(f"{prefix}/f1_macro", f1_m)
+            mlflow.log_metric(f"{prefix}/accuracy", acc)
+            mlflow.log_metric(f"{prefix}/log_loss", ll)
+            mlflow.log_metric(f"{prefix}/ece", ece)
+            logger.info(
+                f"  {prefix} : f1_w={f1_w:.4f} f1_m={f1_m:.4f} "
+                f"acc={acc:.4f} log_loss={ll:.4f} ece={ece:.4f}"
+            )
+
+            # Artifact JSON : F1 par classe (27 valeurs).
+            # Pas en metric (sinon 27 lignes MLflow par run, pollue l'UI).
+            # Permet l'analyse fine "quelle classe a tiré le F1 vers le bas ?"
+            # et la comparaison f1_per_class entre base learners (texte vs image).
+            f1_per_class = f1_score(
+                y_vs, y_pred, labels=list(range(n_classes)),
+                average=None, zero_division=0,
+            )
+            mlflow.log_dict(
+                {
+                    "val_selection_version": n_val_selection,
+                    "n_classes": n_classes,
+                    "f1_per_class": f1_per_class.tolist(),
+                },
+                f"{prefix}_f1_per_class.json",
+            )
+
+            # Garde-fou : la métrique d'arbitrage @active reste f1_weighted.
+            # On expose ici la variable pour compute_promotion_decision.
+            f1_vs = f1_w
+
 
             # ========================================================== #
             # 5. Log PyFunc model + tag modality + récup version          #

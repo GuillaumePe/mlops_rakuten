@@ -125,7 +125,7 @@ class _ResNet50PartialFTLightning(L.LightningModule):
         weight_decay: float = 1e-4,
     ):
         super().__init__()
-        self.save_hyperparameters()
+#        self.save_hyperparameters()
 
         # Backbone pré-entraîné ImageNet
         weights = models.ResNet50_Weights.IMAGENET1K_V2
@@ -211,13 +211,31 @@ class _ResNet50PartialFTLightning(L.LightningModule):
             p for p in self.backbone.parameters()
             if p.requires_grad and id(p) not in head_param_ids
         ]
-        return torch.optim.AdamW(
+        optimizer = torch.optim.AdamW(
             [
                 {"params": backbone_params, "lr": self.lr_backbone},
                 {"params": head_params, "lr": self.lr_head},
             ],
-            weight_decay=self.weight_decay,
+            weight_decay=self.weight_decay)
+        # Scheduler sur lr_head uniquement (param group 0)
+        # lr_backbone reste fixe à 1e-5 (déjà dans son basin ImageNet)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.5,       # divise par 2
+            patience=2,       # après 2 epochs sans amélioration val_loss
+            min_lr=1e-6,
         )
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+            "scheduler": scheduler,
+            "monitor": "val_loss",    # métrique surveillée
+            "interval": "epoch",
+            "frequency": 1,
+            },
+        }
 
 
 # ====================================================================== #
@@ -351,7 +369,8 @@ class ResNet50PartialFT(BaseLearner):
         y_train: np.ndarray,
         X_val: pl.DataFrame | None = None,
         y_val: np.ndarray | None = None,
-    ) -> "ResNet50PartialFT":
+        **kwargs,
+            ) -> "ResNet50PartialFT":
         """
         Fine-tune ResNet50 partial avec early stopping interne.
 
@@ -363,6 +382,13 @@ class ResNet50PartialFT(BaseLearner):
         2. Construit les chemins d'image train + val depuis (productid, imageid)
         3. DataLoaders : train avec augmentation, val sans
         4. Fit Lightning avec early stopping sur val_f1_weighted
+		kwargs reconnus (convention M.0a) :
+            lightning_logger: pl.loggers.Logger | None
+                Si fourni, utilisé par L.Trainer pour logger les métriques par
+                epoch (train_loss, val_loss, val_f1_weighted, ...) vers MLflow
+                ou autre backend. Sinon, logger=False (pas de logging par epoch).
+                Permet à BaseLearnerExperiment de partager son run MLflow actif
+                avec le Trainer Lightning interne.        
         """
         if (X_val is None) != (y_val is None):
             raise ValueError(
@@ -406,18 +432,19 @@ class ResNet50PartialFT(BaseLearner):
         # Trainer
         callbacks = [
             EarlyStopping(
-                monitor="val_f1_weighted",
-                mode="max",
+                monitor="val_loss",
+                mode="min",
                 patience=self._patience,
                 verbose=True,
             ),
         ]
+        lightning_logger = kwargs.get("lightning_logger", None)
         trainer = L.Trainer(
             max_epochs=self._max_epochs,
             callbacks=callbacks,
             precision=self._precision,
             enable_checkpointing=False,
-            logger=False,
+            logger=lightning_logger if lightning_logger is not None else False,
             log_every_n_steps=50,
         )
         trainer.fit(self.net, train_loader, val_loader)

@@ -24,7 +24,9 @@ learner:
     dropout: 0.5
     # Optimisation
     lr: 1e-3
-    weight_decay: 0.0
+    weight_decay: 1e-2
+    patience: 5
+    max_epochs: 15
 
 mlflow:
   tracking_uri: "http://mlflow:5000"

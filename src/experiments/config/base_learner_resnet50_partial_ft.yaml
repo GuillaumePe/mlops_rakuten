@@ -22,7 +22,7 @@ learner:
     lr_head: 1e-3
     lr_backbone: 1e-5
     # Regularisation
-    weight_decay: 1e-4
+    weight_decay: 1e-2
     # Hardware
     num_workers: 4
     random_state: 42

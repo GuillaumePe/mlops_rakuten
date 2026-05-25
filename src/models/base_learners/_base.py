@@ -108,6 +108,7 @@ class BaseLearner(ABC):
         y_train: np.ndarray,
         X_val: pl.DataFrame | None = None,
         y_val: np.ndarray | None = None,
+        **kwargs,
     ) -> "BaseLearner":
         """
         Entraîne le base learner.
@@ -120,6 +121,20 @@ class BaseLearner(ABC):
                 Les frozen learners ignorent cet argument.
             y_val: labels de validation, shape (len(X_val),). Doit être fourni
                 si X_val l'est.
+			**kwargs: paramètres optionnels passés par l'orchestrateur
+                (BaseLearnerExperiment). Convention M.0a :
+                  - lightning_logger (pl.loggers.Logger | None) :
+                      logger Lightning à utiliser pour les métriques par epoch
+                      (train_loss, val_loss, val_f1_weighted, learning_rate, ...).
+                      Si fourni, les deep learners le passent à leur Trainer.
+                      Les frozen learners l'ignorent.
+                      Permet à BaseLearnerExperiment de créer un MLFlowLogger
+                      lié au run MLflow actif, garantissant que les métriques
+                      Lightning atterrissent dans le même run que les métriques
+                      val_selection (single source of truth).
+                Les kwargs inconnus DOIVENT être ignorés silencieusement (pas
+                de TypeError) pour permettre l'évolution du contrat sans
+                casser les learners existants.                
 
         Returns:
             self (chaînable).
