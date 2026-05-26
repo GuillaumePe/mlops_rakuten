@@ -1,0 +1,5 @@
+outs:
+- md5: 8f440c93dee3e5e31b60112caa2133cf
+  size: 2170073203
+  hash: md5
+  path: image_train.tar.zst

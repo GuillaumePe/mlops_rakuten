@@ -1,4 +1,8 @@
-/raw_data_test
-/raw_data/X_train.csv
-/raw_data/Y_train.csv
-
+/raw_data/**
+!/raw_data/**/
+!/raw_data/**/*.dvc
+!/raw_data/**/.gitignore
+/raw_data_test/**
+!/raw_data_test/**/
+!/raw_data_test/**/*.dvc
+!/raw_data_test/**/.gitignore

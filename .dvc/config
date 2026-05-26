@@ -1,5 +1,5 @@
 [core]
-    remote = origin
-['remote "origin"']
-    url = s3://dvc
-    endpointurl = https://dagshub.com/GuillaumePe/mar25_cmlops_rakuten.s3
+    remote = r2
+['remote "r2"']
+    url = s3://rakuten-mlops-dvc/dvc-storage
+    endpointurl = https://2321337a556901d537efb7d2e2271290.r2.cloudflarestorage.com

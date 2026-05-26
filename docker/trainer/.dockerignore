@@ -1,0 +1,27 @@
+.git
+.venv
+.dvc/cache
+.dvc/tmp
+.dvc/config.local
+
+# Excluve les vrais fichiers de data/ (gros)
+# mais GARDE les .dvc files (légers, nécessaires)
+data/**
+!data/**/*.dvc
+!data/**/.gitignore
+
+# Reste
+mlruns_test/
+mlruns/
+__pycache__
+*.pyc
+.pytest_cache
+*.egg-info
+notebooks/
+docker-compose*.yml
+README.md
+TECH_DEBT.md
+*.log
+.env
+.env.local
+mongo_dump_local/

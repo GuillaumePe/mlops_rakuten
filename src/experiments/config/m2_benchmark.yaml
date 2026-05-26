@@ -1,0 +1,63 @@
+# Configuration M2.2 — reproduction benchmark Rakuten
+# TextCNN from scratch + ResNet50 partial FT + StackingLGBM
+datamodule:
+  mode: m2_embeddings
+  # NOTE : text_model et image_model sont les modèles utilisés par prepare_data()
+  # pour le cache parquet partagé. M2.2 ignore les colonnes text_feat_*/image_feat_*
+  # de ce cache (TextCNN et ResNet50PartialFT apprennent leurs propres embeddings)
+  # mais réutilise le même fichier de cache pour gold, batches, features tabulaires
+  # et désormais 'text' (raw).
+  text_model: dangvantuan/sentence-camembert-base
+  image_model: resnet18
+  cache_version: 1
+  batch_size: 64
+  num_workers: 4
+  val_size: 0.10
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+
+model:
+  n_classes: 27
+  n_folds: 5
+  n_trials: 30
+  random_state: 42
+  n_jobs_optuna: 4
+  # Hyperparams TextCNN
+  textcnn:
+    vocab_size: 50000
+    max_len: 128
+    embed_dim: 300
+    n_filters: 512
+    kernel_sizes: [1, 2, 3, 4, 5, 6]
+    dropout: 0.5
+    batch_size: 64
+    max_epochs: 15
+    patience: 2
+    lr: 1.0e-3
+  # Hyperparams ResNet50 partial FT 
+  resnet50:
+    n_unfrozen_layers: 27
+    batch_size: 32
+    max_epochs: 15
+    patience: 3
+    lr_head: 1.0e-3
+    lr_backbone: 1.0e-5
+
+mlflow:
+  experiment_name: M2_benchmark_phase1
+  run_name: M2_benchmark_textcnn_resnet50_v1
+  tracking_uri: http://mlflow:5000
+  tags:
+    model_family: M2.2
+    model_variant: benchmark
+    base_text: textcnn
+    base_image: resnet50_partial_ft
+    architecture: stacking_logreg_lgbm
+    phase: phase_1_benchmark
+    exp_id: m22_benchmark_reproduction
+    requires_raw_data: "true"  # ← signal à SklearnExperiment
+
+promotion:
+  registry_model_name: "rakuten-m2-benchmark"
+  epsilon: 0.005

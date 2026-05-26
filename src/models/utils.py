@@ -1,3 +1,4 @@
+from __future__ import annotations
 import mlflow
 import optuna
 import numpy as np
@@ -7,6 +8,14 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from lightgbm import LGBMClassifier
 from sklearn.metrics import f1_score
+from dataclasses import dataclass
+ 
+import logging
+import os
+from typing import Optional
+ 
+logger = logging.getLogger(__name__)
+ 
 
 def get_or_create_experiment(experiment_name):
   """
@@ -285,7 +294,7 @@ def promotion_exclusive_best_model_to_production(model_name, model_version):
         if current_version != model_version:
             print(f"Suppression de l'alias 'champion' actuellement sur version {current_version}")
             client.delete_registered_model_alias(model_name, "champion")
-    except mlflow.exceptions.RestException:
+    except mlflow.exceptions.MlflowException:
         print("Alias 'champion' non trouvé, aucun conflit à résoudre.")
 
     # Ajouter alias "champion" à la nouvelle version
@@ -320,3 +329,402 @@ def get_f1_score_from_model_uri(model_uri: str, metric_name: str = "f1_score") -
 
     except Exception as e:
         raise RuntimeError(f"Erreur lors de la récupération du f1-score depuis {model_uri} : {e}")
+
+
+@dataclass
+class PromotionResult:
+    """Résultat de l'évaluation de promotion @champion."""
+    promoted: bool
+    reason: str
+    model_name: str
+    candidate_version: str
+    candidate_score: float
+    champion_version: Optional[str] = None
+    champion_score: Optional[float] = None
+    gain: Optional[float] = None
+    epsilon: float = 0.0
+
+    def __str__(self) -> str:
+        head = "✓ PROMOTED" if self.promoted else "✗ NOT PROMOTED"
+        out = f"{head} : {self.model_name} v{self.candidate_version}"
+        out += f"\n  reason: {self.reason}"
+        out += f"\n  candidate_score: {self.candidate_score:.4f}"
+        if self.champion_score is not None:
+            out += f"\n  champion_score: {self.champion_score:.4f} (v{self.champion_version})"
+            out += f"\n  gain: {self.gain:+.4f} (threshold: {self.epsilon:+.4f})"
+        return out
+
+
+def evaluate_promotion_via_logged_metrics(
+    model_name: str,
+    candidate_version: str,
+    metric_key: str = "eval_gold/f1_weighted",
+    epsilon: float = 0.005,
+) -> PromotionResult:
+    """
+    Compare un candidat au champion actuel via les métriques MLflow déjà loggées
+    (pas de prédiction live).
+
+    Logique :
+    - Pas de champion existant → promotion automatique comme baseline
+    - Champion existe → promotion si (candidate - champion) >= epsilon
+
+    Note statistique : avec n_gold ≈ 8500 et F1 ≈ 0.85, σ_F1 ≈ 0.004.
+    Un epsilon = 0.005 ≈ 1.3σ correspond à ~90% de confiance unilatérale.
+    Pour 95% de confiance unilatérale, prendre epsilon = 0.007.
+
+    Args:
+        model_name: nom du modèle dans le registry
+        candidate_version: version du candidat fraîchement enregistrée
+        metric_key: clé MLflow de la métrique de comparaison
+        epsilon: seuil de gain minimal pour promotion
+
+    Returns:
+        PromotionResult avec décision et justification (et exécution de la promotion si applicable).
+    """
+    import mlflow
+    client = mlflow.tracking.MlflowClient()
+
+    # 1. Score du candidat (lit la métrique loggée pendant le fit)
+    candidate_mv = client.get_model_version(model_name, candidate_version)
+    candidate_run = client.get_run(candidate_mv.run_id)
+    candidate_score = candidate_run.data.metrics.get(metric_key)
+    if candidate_score is None:
+        raise ValueError(
+            f"Candidate v{candidate_version} n'a pas la métrique '{metric_key}'. "
+            "Vérifier que _log_eval_matrix() est bien appelé pendant le fit."
+        )
+
+    # 2. Score du champion actuel (s'il existe)
+    try:
+        champion_uri = f"models:/{model_name}@champion"
+        champion_score = get_f1_score_from_model_uri(champion_uri, metric_name=metric_key)
+        champion_mv = client.get_model_version_by_alias(model_name, "champion")
+        champion_version = champion_mv.version
+    except (mlflow.exceptions.MlflowException, RuntimeError):
+        # Pas de champion : promotion automatique
+        promotion_exclusive_best_model_to_production(model_name, candidate_version)
+        return PromotionResult(
+            promoted=True,
+            reason="first_champion (no previous champion in registry)",
+            model_name=model_name,
+            candidate_version=candidate_version,
+            candidate_score=candidate_score,
+            epsilon=epsilon,
+        )
+
+    # 3. Comparaison avec seuil ε
+    gain = candidate_score - champion_score
+    if gain >= epsilon:
+        promotion_exclusive_best_model_to_production(model_name, candidate_version)
+        return PromotionResult(
+            promoted=True,
+            reason=f"gain {gain:+.4f} >= epsilon {epsilon:+.4f} (significant)",
+            model_name=model_name,
+            candidate_version=candidate_version,
+            candidate_score=candidate_score,
+            champion_version=champion_version,
+            champion_score=champion_score,
+            gain=gain,
+            epsilon=epsilon,
+        )
+    else:
+        return PromotionResult(
+            promoted=False,
+            reason=f"gain {gain:+.4f} < epsilon {epsilon:+.4f} (not significant)",
+            model_name=model_name,
+            candidate_version=candidate_version,
+            candidate_score=candidate_score,
+            champion_version=champion_version,
+            champion_score=champion_score,
+            gain=gain,
+            epsilon=epsilon,
+        )
+    
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 1 — Convention val_selection versionné (Bloc M.0)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Le val_selection est un 3ème split orthogonal au gold, qui sert d'arbitre
+# pour les promotions @active (au niveau base learner) et @active_text /
+# @active_image (au niveau modalité). Il est versionné car re-créé à chaque
+# ingestion d'un nouveau batch (v1 = batch_1, v2 = batch_1∪batch_2, etc.).
+#
+# La variable d'environnement ACTIVE_VAL_SELECTION_VERSION détermine quelle
+# version est utilisée pour résoudre les colonnes is_val_selection_v{N} dans
+# _df_full et pour piloter les promotions @active.
+#
+# Voir checklist_phase_1.md (section "Conventions Phase 1") pour la spec
+# complète. Détails M.0 dans scripts/init_val_selection.py.
+# ═════════════════════════════════════════════════════════════════════════════
+ 
+ACTIVE_VAL_SELECTION_VERSION_ENV = "ACTIVE_VAL_SELECTION_VERSION"
+DEFAULT_VAL_SELECTION_VERSION = 1  # Phase 1 démarrage : v1 obligatoire après init
+ 
+ 
+def get_active_val_selection_version() -> int:
+    """
+    Retourne la version courante du val_selection à utiliser pour les évaluations
+    et les promotions @active.
+ 
+    Sources de résolution (premier non-None gagne) :
+      1. Variable d'environnement ACTIVE_VAL_SELECTION_VERSION
+      2. Airflow Variable du même nom (si Airflow disponible dans le contexte)
+      3. Valeur par défaut DEFAULT_VAL_SELECTION_VERSION (= 1)
+ 
+    Le retour est int ∈ {1, 2, 3} (Phase 1 limite à 3 batches).
+ 
+    Raises:
+        ValueError: si la valeur résolue n'est pas un entier dans [1, 3].
+ 
+    Examples:
+        >>> os.environ["ACTIVE_VAL_SELECTION_VERSION"] = "2"
+        >>> get_active_val_selection_version()
+        2
+        >>> del os.environ["ACTIVE_VAL_SELECTION_VERSION"]
+        >>> get_active_val_selection_version()
+        1
+    """
+    raw: Optional[str] = os.environ.get(ACTIVE_VAL_SELECTION_VERSION_ENV)
+ 
+    if raw is None:
+        raw = _try_read_airflow_variable(ACTIVE_VAL_SELECTION_VERSION_ENV)
+ 
+    if raw is None:
+        logger.debug(
+            f"{ACTIVE_VAL_SELECTION_VERSION_ENV} non défini, utilise défaut "
+            f"= {DEFAULT_VAL_SELECTION_VERSION}"
+        )
+        return DEFAULT_VAL_SELECTION_VERSION
+ 
+    try:
+        version = int(raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"{ACTIVE_VAL_SELECTION_VERSION_ENV}={raw!r} n'est pas un entier valide. "
+            f"Attendu : 1, 2 ou 3."
+        ) from e
+ 
+    if version not in (1, 2, 3):
+        raise ValueError(
+            f"{ACTIVE_VAL_SELECTION_VERSION_ENV}={version} hors plage. "
+            f"Attendu : 1, 2 ou 3 (Phase 1)."
+        )
+ 
+    return version
+ 
+ 
+def _try_read_airflow_variable(key: str) -> Optional[str]:
+    """Lecture best-effort d'une Airflow Variable, retourne None si Airflow
+    n'est pas dans le contexte d'exécution (ex: lancement local hors DAG)."""
+    try:
+        from airflow.models import Variable  # noqa: WPS433 (lazy import volontaire)
+        return Variable.get(key, default_var=None)
+    except Exception:  # ImportError, AirflowException, etc.
+        return None
+ 
+ 
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 1 — Helpers MLflow alias @active (Bloc M.3) — STUBS
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# La mécanique @active / @active_text / @active_image complète sera implémentée
+# en M.3 (cf. checklist_phase_1.md, section "Conventions Phase 1"). Pour M.0,
+# on expose juste les stubs pour que les imports compilent. L'implémentation
+# détaillée arrive avec M.4 (BaseLearnerExperiment).
+#
+# ⚠ NE PAS CONFONDRE avec les helpers @champion existants plus haut dans ce
+# fichier (promotion_exclusive_best_model_to_production, etc.). Les deux
+# mécaniques coexistent :
+#   - @champion : arbitre = gold, niveau assembled (Bloc P)
+#   - @active   : arbitre = val_selection, niveau base learner (Bloc M.4)
+# ═════════════════════════════════════════════════════════════════════════════
+ 
+def resolve_active_modality(modality: str) -> tuple[str, int]:
+    """
+    Retourne (registered_model_name, version) du base learner promu
+    @active_<modality>.
+ 
+    Scan toutes les registered models dont le nom commence par 'rakuten-base-',
+    cherche celui qui porte l'alias 'active_<modality>'.
+ 
+    Args:
+        modality: 'text' | 'image' | 'tabular'
+ 
+    Returns:
+        (registered_model_name, version) du base learner @active_<modality>
+ 
+    Raises:
+        ValueError: si modality invalide.
+        RuntimeError: si aucun base learner ne porte cet alias (Phase 1 démarrage
+            ou avant le premier fit_base_learner d'une modalité).
+    """
+    if modality not in ("text", "image", "tabular"):
+        raise ValueError(
+            f"modality={modality!r} invalide. Attendu : 'text', 'image' ou 'tabular'."
+        )
+ 
+    client = mlflow.tracking.MlflowClient()
+    alias_name = f"active_{modality}"
+ 
+    for rm in client.search_registered_models():
+        if not rm.name.startswith("rakuten-base-"):
+            continue
+        try:
+            mv = client.get_model_version_by_alias(rm.name, alias_name)
+            return (rm.name, int(mv.version))
+        except mlflow.exceptions.MlflowException:
+            continue
+ 
+    raise RuntimeError(
+        f"Aucun base learner ne porte l'alias @{alias_name}. "
+        f"Lancer fit_base_learner pour un modèle de modalité {modality!r} d'abord."
+    )
+ 
+ 
+def refresh_modality_alias(modality: str) -> None:
+    """
+    Cascade auto : pose @active_<modality> sur le base learner dont le @active
+    a le meilleur F1 sur le val_selection actif. Retire l'alias des autres.
+ 
+    Cette fonction est appelée à la fin de BaseLearnerExperiment.fit() pour
+    propager une promotion @active au niveau modalité (cf. checklist Phase 1
+    Bloc M.3).
+ 
+    Args:
+        modality: 'text' | 'image' | 'tabular'
+ 
+    Raises:
+        ValueError: si modality invalide.
+ 
+    Note:
+        Si aucun candidat valide (= aucun base learner taggé modality={modality}
+        avec un @active porteur de la métrique val_selection_v{n}), log un
+        warning et retourne sans rien faire.
+    """
+    if modality not in ("text", "image", "tabular"):
+        raise ValueError(
+            f"modality={modality!r} invalide. Attendu : 'text', 'image' ou 'tabular'."
+        )
+ 
+    client = mlflow.tracking.MlflowClient()
+    n = get_active_val_selection_version()
+    metric_key = f"val_selection_v{n}/f1_weighted"
+    alias_name = f"active_{modality}"
+ 
+    best_name: Optional[str] = None
+    best_version: Optional[int] = None
+    best_f1: float = -1.0
+    candidates: list[str] = []
+ 
+    for rm in client.search_registered_models():
+        if not rm.name.startswith("rakuten-base-"):
+            continue
+        if rm.tags.get("modality") != modality:
+            continue
+        try:
+            mv = client.get_model_version_by_alias(rm.name, "active")
+        except mlflow.exceptions.MlflowException:
+            continue
+        candidates.append(rm.name)
+        try:
+            run = client.get_run(mv.run_id)
+            f1 = run.data.metrics.get(metric_key)
+            if f1 is None:
+                continue
+        except mlflow.exceptions.MlflowException:
+            continue
+ 
+        if f1 > best_f1:
+            best_f1, best_name, best_version = f1, rm.name, int(mv.version)
+ 
+    if best_name is None:
+        logger.warning(
+            f"refresh_modality_alias({modality!r}): aucun candidat avec @active "
+            f"+ métrique '{metric_key}'. Pas de promotion @{alias_name}."
+        )
+        return
+ 
+    # Retirer @active_{modality} des autres candidats (s'il existait)
+    for cand_name in candidates:
+        if cand_name == best_name:
+            continue
+        try:
+            existing_mv = client.get_model_version_by_alias(cand_name, alias_name)
+            client.delete_registered_model_alias(cand_name, alias_name)
+            logger.info(
+                f"Retiré @{alias_name} de {cand_name} v{existing_mv.version}"
+            )
+        except mlflow.exceptions.MlflowException:
+            pass
+ 
+    # Poser @active_{modality} sur le meilleur
+    client.set_registered_model_alias(best_name, alias_name, best_version)
+    logger.info(
+        f"Posé @{alias_name} sur {best_name} v{best_version} "
+        f"(F1 val_selection_v{n}={best_f1:.4f})"
+    )
+ 
+ 
+def compute_promotion_decision(
+    name: str,
+    run_id_new: str,
+    threshold: float = 0.005,
+) -> bool:
+    """
+    True ssi la nouvelle version bat l'@active courant de > threshold sur le
+    val_selection actif.
+ 
+    Lit ACTIVE_VAL_SELECTION_VERSION pour résoudre la métrique correcte :
+    'val_selection_v{n}/f1_weighted'.
+ 
+    Args:
+        name: registered_model_name (ex: 'rakuten-base-textcnn').
+        run_id_new: run_id de la version candidate (déjà loggée mais pas
+            encore promue @active).
+        threshold: seuil de gain minimal pour promotion. Default 0.005
+            (≈ 1.3σ avec n_val_selection ≈ 4500, ~90% confiance unilatérale).
+ 
+    Returns:
+        True ssi promotion à @active doit être effectuée.
+        Cas particuliers :
+        - Pas d'@active courant → True (first promotion)
+        - @active courant sans métrique val_selection_v{n} → True (incomparable,
+          on remplace par sécurité avec un warning)
+ 
+    Raises:
+        ValueError: si run_id_new n'a pas la métrique 'val_selection_v{n}/f1_weighted'.
+    """
+    client = mlflow.tracking.MlflowClient()
+    n = get_active_val_selection_version()
+    metric_key = f"val_selection_v{n}/f1_weighted"
+ 
+    # 1. Score du candidat
+    new_run = client.get_run(run_id_new)
+    new_f1 = new_run.data.metrics.get(metric_key)
+    if new_f1 is None:
+        raise ValueError(
+            f"Run {run_id_new} n'a pas la métrique '{metric_key}'. "
+            f"Vérifier que BaseLearnerExperiment.fit() loggue bien cette métrique."
+        )
+ 
+    # 2. Score de l'@active courant (si existe)
+    try:
+        current_mv = client.get_model_version_by_alias(name, "active")
+        current_run = client.get_run(current_mv.run_id)
+        current_f1 = current_run.data.metrics.get(metric_key)
+        if current_f1 is None:
+            logger.warning(
+                f"@active de {name} (v{current_mv.version}) n'a pas '{metric_key}'. "
+                f"Promotion par défaut (incomparable)."
+            )
+            return True
+    except mlflow.exceptions.MlflowException:
+        # Pas d'@active courant : first promotion
+        return True
+ 
+    # 3. Comparaison
+    delta = new_f1 - current_f1
+    return delta > threshold
+
+ 

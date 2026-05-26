@@ -177,7 +177,17 @@ For the raw_data_test (not optional):
   mkdir data/raw_data_test/images_test
   ```
 Put the images downloaded for the test in data/raw_data_test/images_test and the test csvs in data/raw_data_test
+Copier le template d'environnement :
+```bash
+   cp .env.example .env
+```
+ Générer une SECRET_KEY :
+```bash
+   python -c "import secrets; print(secrets.token_urlsafe(64))"
+```
+   Coller dans `.env` à la place de `changeme-generate-with-...`.
 
+ Définir des passwords forts pour `_AIRFLOW_WWW_USER_PASSWORD`, `API_PASSWORD`, `POSTGRES_PASSWORD` dans `.env`.
 Then Launch docker
   ```sh
   docker volume create --name=mar25_cmlops_rakuten_mongo_data
