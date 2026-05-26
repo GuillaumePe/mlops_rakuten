@@ -36,6 +36,7 @@ RUNPOD_GPU_MAP = {
     "rtx_a6000": "NVIDIA RTX A6000",
     "rtx_4000_ada": "NVIDIA RTX 4000 Ada Generation",
     "rtx_5000_ada": "NVIDIA RTX 5000 Ada Generation",
+    
     # Datacenter
     "l4": "NVIDIA L4",
     "l40": "NVIDIA L40",
@@ -45,6 +46,7 @@ RUNPOD_GPU_MAP = {
     "a100_80gb": "NVIDIA A100 80GB PCIe",
     "rtx_pro_4500": "NVIDIA RTX PRO 4500 Blackwell",
     "rtx_pro_6000_wk": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "rtx_pro_6000": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
 }
 
 

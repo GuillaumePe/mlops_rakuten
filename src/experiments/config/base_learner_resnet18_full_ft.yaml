@@ -1,0 +1,33 @@
+datamodule:
+  mode: "raw_for_finetune"
+  batch_size: 32
+  num_workers: 4
+  val_size: 0.2
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+  data_folder: "data/raw_data"
+
+learner:
+  name: "resnet18_full_ft"
+  config:
+    n_classes: 27
+    batch_size: 32
+    max_epochs: 15
+    patience: 5
+    lr: 1.0e-4
+    weight_decay: 1e-2
+    num_workers: 4
+    random_state: 42
+    precision: "bf16-mixed"
+    augmentation_level: "medium"
+
+mlflow:
+  tracking_uri: "http://mlflow:5000"
+  experiment_name: "base_learners_phase1"
+  run_name: "resnet18_full_ft_m21"
+  tags:
+    phase: "1"
+    bloc: "N"
+    learner: "resnet18_full_ft"
+    modality: "image"

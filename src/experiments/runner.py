@@ -27,6 +27,8 @@ import yaml
 from src.experiments.datamodule.rakuten_datamodule import RakutenLightningDataModule
 from src.experiments.models.m2.m2 import M2Stacking
 from src.experiments.strategies.sklearn_experiment import SklearnExperiment
+from src.experiments.strategies.base_learner_experiment import BaseLearnerExperiment
+from src.models.assembled.m2_baseline import M2Baseline
 import os
 
 
@@ -118,18 +120,140 @@ def build_m2_experiment(config: dict) -> tuple[RakutenLightningDataModule, Sklea
     )
     return dm, experiment
 
+def build_m2_baseline_experiment(config: dict) -> tuple[RakutenLightningDataModule, SklearnExperiment]:
+    """
+    Assemble DataModule + M2Baseline + SklearnExperiment depuis une config.
+
+    Nouvelle architecture Phase 1 (modulaire) : équivalent fonctionnel de
+    build_m2_experiment, mais via CamembertFrozen + ResNet18Frozen + StackingLGBM.
+    Sert au test d'intégration L.5 (reproduction M2 v4).
+    """
+    dm_cfg = config["datamodule"]
+    dm = RakutenLightningDataModule(
+        mode=dm_cfg.get("mode", "m2_embeddings"),
+        text_model=dm_cfg["text_model"],
+        image_model=dm_cfg["image_model"],
+        cache_version=dm_cfg.get("cache_version", 1),
+        batch_size=dm_cfg.get("batch_size", 64),
+        num_workers=dm_cfg.get("num_workers", 4),
+        val_size=dm_cfg.get("val_size", 0.10),
+        random_state=dm_cfg.get("random_state", 42),
+        limit=config.get("limit"),
+        train_batches=dm_cfg.get("train_batches", [1]),
+        exclude_gold=dm_cfg.get("exclude_gold", True),
+    )
+
+    model_cfg = config["model"]
+
+    def m2_baseline_factory(_optuna_callback_unused):
+        return M2Baseline(
+            tabular_cols=dm.tabular_cols,
+            text_embed_dim=768,
+            image_embed_dim=512,
+            n_classes=model_cfg.get("n_classes", 27),
+            n_folds=model_cfg.get("n_folds", 5),
+            n_trials=model_cfg.get("n_trials", 30),
+            random_state=model_cfg.get("random_state", 42),
+            n_jobs_optuna=model_cfg.get("n_jobs_optuna", 4),
+        )
+
+    promotion_cfg = config.get("promotion", {})
+    yaml_tags = config["mlflow"].get("tags", {})
+    combined_tags = {
+        **yaml_tags,
+        "registry_model_name": promotion_cfg.get("registry_model_name", "rakuten-m2-stacking"),
+        "promotion_epsilon": str(promotion_cfg.get("epsilon", 0.005)),
+    }
+
+    experiment = SklearnExperiment(
+        model_factory=m2_baseline_factory,
+        run_name=config["mlflow"]["run_name"],
+        tags=combined_tags,
+    )
+    return dm, experiment
+def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataModule, BaseLearnerExperiment]:
+    """
+    M.5 — Assemble DataModule + BaseLearnerExperiment pour un base learner (TextCNN, ResNet50, etc.).
+ 
+    Config attendue :
+    ```yaml
+    datamodule:
+      mode: "base_learners"  # Mode où on récupère les features brutes
+      ...
+    learner:
+      name: "textcnn" ou "resnet50_partial_ft"
+      config: {...}  # hyperparams du learner
+    mlflow:
+      experiment_name: "base_learners_phase1"
+      run_name: "textcnn_run_1"
+      ...
+    ```
+    """
+    print("[DEBUG] build_base_learner_experiment START")
+    dm_cfg = config["datamodule"]
+    dm = RakutenLightningDataModule(
+        mode=dm_cfg.get("mode", "raw_for_finetune"),
+        text_model=dm_cfg.get("text_model", None),
+        image_model=dm_cfg.get("image_model", None),
+        batch_size=dm_cfg.get("batch_size", 64),
+        num_workers=dm_cfg.get("num_workers", 4),
+        val_size=dm_cfg.get("val_size", 0.10),
+        random_state=dm_cfg.get("random_state", 42),
+        limit=config.get("limit"),
+        train_batches=dm_cfg.get("train_batches", [1]),
+        exclude_gold=dm_cfg.get("exclude_gold", True),
+    )
+    print("[DEBUG] DataModule instantiated")
+    learner_cfg = config["learner"]
+    print(f"[DEBUG] learner_cfg: {learner_cfg}")
+    learner_name = learner_cfg["name"]
+    learner_config = learner_cfg.get("config", {})
+ 
+    mlflow_cfg = config["mlflow"]
+    # Priorité : env var (set par submit_cloud) > CLI > config YAML > default
+    tracking_uri = (
+        os.getenv("MLFLOW_TRACKING_URI")
+        or mlflow_cfg.get("tracking_uri")
+        or "http://mlflow:5000"
+    )
+    experiment_name = mlflow_cfg.get("experiment_name", "base_learners_phase1")
+    print("[DEBUG] Creating BaseLearnerExperiment...")
+    # Instancier BaseLearnerExperiment (Strategy pattern)
+    experiment = BaseLearnerExperiment(
+        learner_name=learner_name,
+        config=learner_config,
+        tracking_uri=tracking_uri,
+        experiment_name=experiment_name,
+        data_folder=Path(dm_cfg.get("data_folder", "data/raw_data")),
+        cache_output_dir=Path(os.getenv("DATA_ROOT", ".")) / "data/cache",
+    )
+    print("[DEBUG] BaseLearnerExperiment instantiated")
+    return dm, experiment
 
 # Registry des constructeurs par expérience.
-# Phase 1+ : ajouter "m3", "m4" ici.
 EXPERIMENT_BUILDERS = {
-    "m2": build_m2_experiment,
+    "m2": build_m2_experiment,                  # legacy M2Stacking (à déprécier après L.5 validé)
+    "m2_baseline": build_m2_baseline_experiment,  # nouvelle archi modulaire Phase 1
+    "base_learner_textcnn": build_base_learner_experiment,
+    "base_learner_resnet50_partial_ft": build_base_learner_experiment,
+    "base_learner_camembert_lora": build_base_learner_experiment,
+    "base_learner_resnet18_full_ft": build_base_learner_experiment,
+
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Commands (actions)
+# ─────────────────────────────────────────────────────────────────────────────
+ 
 
 def cmd_prepare_data(dm: RakutenLightningDataModule):
     """Extrait/met à jour le cache d'embeddings. Étape lourde (GPU recommandé)."""
-    print(f"[Runner] prepare_data() — cache: {dm.cache_path}")
-    dm.prepare_data()
+    print(f"[Runner] prepare_data() — cache: {dm.cache_path if hasattr(dm, 'cache_path') else 'N/A'}")
+    if hasattr(dm, 'prepare_data'):
+        dm.prepare_data()
+    else:
+        print("[Runner] DataModule n'a pas de prepare_data() (OK pour base_learners)")
+
 
 
 def cmd_fit(dm: RakutenLightningDataModule, experiment: SklearnExperiment):
@@ -152,6 +276,16 @@ def cmd_evaluate(dm: RakutenLightningDataModule, experiment: SklearnExperiment):
     results = experiment.evaluate(dm)
     print(f"[Runner] Résultats sur test : {results}")
     return results
+
+def cmd_fit_base_learner(dm: RakutenLightningDataModule, experiment):
+    """M.5 — Action pour fit un base learner (TextCNN, ResNet50PartialFT, etc.)."""
+    print("[Runner.M5] fit_base_learner() — orchestration BaseLearnerExperiment")
+    print("[Runner.M5] setup()...")
+    dm.setup()
+    print("[Runner.M5] fit() avec MLflow tracking + alias promotion...")
+    experiment.fit(dm)
+    print("[Runner.M5] fit_base_learner() terminé")
+
 
 def cmd_smoke_tailscale():
     """
@@ -400,7 +534,7 @@ def main():
     )
     parser.add_argument(
         "--action", required=True,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "submit_cloud", "smoke_tailscale","fetch_logs"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner", "submit_cloud", "smoke_tailscale","fetch_logs"],
         help="Action à exécuter",
     )
     parser.add_argument(
@@ -415,13 +549,13 @@ def main():
     parser.add_argument(
         "--cloud-action",
         default=None,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner"],
         help="(submit_cloud only) Quelle action le pod cloud doit exécuter",
     )
     parser.add_argument(
         "--gpu-types",
         nargs="+",
-        default=["rtx_4090", "rtx_3090", "rtx_4080", "rtx_a5000", "rtx_a6000","rtx_a4000", "a40", "l40", "l40s", "a100_40gb","rtx_pro_4500"],
+        default=["rtx_5090","rtx_4090", "rtx_3090", "rtx_4080", "rtx_a5000", "rtx_a6000","rtx_a4000", "a40", "l40", "l40s", "a100_40gb","rtx_pro_4500"],
         help="(submit_cloud) Liste de GPUs à essayer en cascade (du préféré au fallback)",
 )
     parser.add_argument(
@@ -498,6 +632,10 @@ def main():
         cmd_prepare_data(dm)
         cmd_fit(dm, experiment)
         cmd_evaluate(dm, experiment)
+    elif args.action == "fit_base_learner":
+        cmd_fit_base_learner(dm, experiment)
+    elif args.action == "fetch_logs":
+        cmd_fetch_logs(args)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,40 @@
+# base_learner_camembert_lora.yaml — APRÈS
+datamodule:
+  mode: "raw_for_finetune"
+  batch_size: 32
+  num_workers: 2
+  val_size: 0.2
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+  data_folder: "data/raw_data"
+
+learner:
+  name: "camembert_lora"
+  config:
+    model_name: "camembert-base"
+    n_classes: 27
+    max_len: 128
+    lora_rank: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    batch_size: 32
+    max_epochs: 10
+    patience: 5
+    lr_lora: 5.0e-4
+    lr_head: 1.0e-3
+    weight_decay: 0.01
+    warmup_ratio: 0.1
+    num_workers: 2
+    random_state: 42
+    precision: "bf16-mixed"
+
+mlflow:
+  tracking_uri: "http://mlflow:5000"
+  experiment_name: "base_learners_phase1"
+  run_name: "camembert_lora_m21"
+  tags:
+    phase: "1"
+    bloc: "N"
+    learner: "camembert_lora"
+    modality: "text"
