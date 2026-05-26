@@ -56,15 +56,21 @@ class ResNet18Frozen(BaseLearner):
 
     def fit(
         self,
-        X: pl.DataFrame,
-        y: np.ndarray,
-        val_split: float = 0.2,
+        X_train: pl.DataFrame,
+        y_train: np.ndarray | None = None,
+        X_val: pl.DataFrame | None = None,
+        y_val: np.ndarray | None = None,
     ) -> "ResNet18Frozen":
-        """No-op (cf. CamembertFrozen.fit)."""
-        missing = [c for c in self.cols if c not in X.columns]
+        """
+        No-op pour un learner frozen (cf. CamembertFrozen.fit).
+
+        Les arguments y_train, X_val, y_val sont ignorés (passe-plat sans
+        entraînement).
+        """
+        missing = [c for c in self.cols if c not in X_train.columns]
         if missing:
             raise ValueError(
-                f"ResNet18Frozen.fit : {len(missing)} colonnes manquantes dans X. "
+                f"ResNet18Frozen.fit : {len(missing)} colonnes manquantes dans X_train. "
                 f"Premières manquantes : {missing[:3]}. "
                 f"Le cache parquet du RakutenLightningDataModule a-t-il été produit ?"
             )
@@ -81,19 +87,4 @@ class ResNet18Frozen(BaseLearner):
                 )
         return X.select(self.cols).to_numpy().astype(np.float32)
 
-    def save(self, path: str | Path) -> None:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            f"name={self.name}\n"
-            f"embed_dim={self._embed_dim}\n"
-            f"col_prefix={self.col_prefix}\n"
-            f"fitted={self._fitted}\n"
-        )
-
-    def load(self, path: str | Path) -> "ResNet18Frozen":
-        content = dict(line.split("=") for line in Path(path).read_text().splitlines() if "=" in line)
-        self._embed_dim = int(content["embed_dim"])
-        self.col_prefix = content["col_prefix"]
-        self._fitted = content["fitted"].strip() == "True"
-        return self
+ 

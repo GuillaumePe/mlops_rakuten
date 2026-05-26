@@ -13,7 +13,7 @@ fi
 GITHUB_USER="${GITHUB_USER:?GITHUB_USER must be set}"
 GHCR_TOKEN="${GHCR_TOKEN:?GHCR_TOKEN must be set}"
 IMAGE_NAME="${IMAGE_NAME:-mlops-rakuten-trainer}"
-TAG="${TAG:-latest}"
+TAG="${TAG:-phase-1-l10}"
 FULL_IMAGE="ghcr.io/${GITHUB_USER}/${IMAGE_NAME}:${TAG}"
 
 echo "==================================="

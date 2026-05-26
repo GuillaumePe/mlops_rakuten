@@ -1,6 +1,7 @@
 # Base : PyTorch officielle CUDA 12.1, Python 3.10
 # Versions à ajuster selon les évolutions de PyTorch / CUDA
-FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+# FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime  
 
 # === Métadonnées ===
 LABEL maintainer="GP"
@@ -50,9 +51,10 @@ RUN chmod +x /workspace/entrypoint.sh
 
 # === Sanity check au build ===
 # Vérifie qu'on peut au moins importer les modules clés
-RUN python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}')" \
-    && python -c "import sentence_transformers, lightgbm, polars, mlflow, dvc" \
-    && python -c "import src.experiments.runner; print('src package OK')" \
+# + valide la présence de sm_120 dans les architectures CUDA compilées
+# === Sanity check au build ===
+COPY docker/trainer/sanity_check.py /workspace/sanity_check.py
+RUN cd /workspace && python sanity_check.py \
     && tailscale --version \
     && echo "Image trainer OK"
 

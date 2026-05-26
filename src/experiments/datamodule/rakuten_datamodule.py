@@ -30,7 +30,7 @@ import torch
 from pymongo import MongoClient
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
-
+import mlflow
 from src.experiments.datamodule.encoders import TextEncoder, ImageEncoder, slugify_model_name
 from src.experiments.datamodule.datasets import EmbeddingsDataset, RawMultimodalDataset
 from src.experiments.datamodule.tabular_features import (
@@ -40,10 +40,13 @@ from src.experiments.datamodule.tabular_features import (
     IMAGE_TABULAR_COLS,
 )
 from src.features.utils import clean_description  # legacy, à refondre en Bloc F
+from src.models.utils import get_active_val_selection_version
 
+import logging
 from dotenv import load_dotenv
 load_dotenv()
 
+logger = logging.getLogger(__name__)
 # Constantes Mongo et chemins data
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
 DB_NAME = "MAR25_CMLOPS_RAKUTEN"
@@ -70,7 +73,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
 
     def __init__(
         self,
-        mode: Literal["m2_embeddings", "raw_for_finetune", "m4_embeddings"] = "m2_embeddings",
+        mode: Literal["m2_embeddings", "raw_for_finetune", "m4_embeddings","m2_benchmark"] = "m2_embeddings",
         text_model: str = "dangvantuan/sentence-camembert-base",
         image_model: str = "resnet18",
         cache_version: int = 1,
@@ -84,6 +87,10 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
     ):
         super().__init__()
         self.mode = mode
+        # Pour raw_for_finetune, text_model et image_model sont ignorés
+        if mode != "raw_for_finetune":
+            if text_model is None or image_model is None:
+                raise ValueError(f"text_model et image_model requis pour mode={mode}")
         self.text_model = text_model
         self.image_model = image_model
         self.cache_version = cache_version
@@ -96,10 +103,14 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self.exclude_gold = exclude_gold
 
         # Chemin du cache, déterministe à partir des modèles + version
-        self.cache_path = CACHE_DIR / (
-            f"embeddings_{slugify_model_name(text_model)}_"
-            f"{slugify_model_name(image_model)}_v{cache_version}.parquet"
-        )
+        # (n'existe pas pour raw_for_finetune)
+        if mode == "raw_for_finetune":
+            self.cache_path = None
+        else:
+            self.cache_path = CACHE_DIR / (
+                f"embeddings_{slugify_model_name(text_model)}_"
+                f"{slugify_model_name(image_model)}_v{cache_version}.parquet"
+            )
 
         # Placeholders remplis dans setup()
         self._df_full: pl.DataFrame | None = None
@@ -110,6 +121,12 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self._image_cols: list[str] | None = None
         self._tabular_cols: list[str] | None = None
 
+        # Placeholders M.0 (val_selection versionné)
+        self._df_train_pool_effective: pl.DataFrame | None = None
+        self._df_val_selection: pl.DataFrame | None = None
+        self._val_selection_version: int | None = None
+
+        self._base_learner_caches: dict[str, pl.DataFrame] | None = None
     # --- prepare_data : extraction + cache incrémental --------------------
 
     def prepare_data(self):
@@ -117,6 +134,10 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         Garantit que le cache contient embeddings + tabulaires pour tous les
         productid actuellement en base. Calcule uniquement les manquants.
         """
+        if self.mode == "raw_for_finetune":
+            logger.info("[DataModule] prepare_data() ignoré pour mode=raw_for_finetune")
+            return
+        
         if self.mode != "m2_embeddings":
             raise NotImplementedError(
                 f"prepare_data pour mode={self.mode} sera implémenté en Phase 1+"
@@ -215,13 +236,14 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         image_encoder = ImageEncoder(self.image_model)
         image_emb = image_encoder.encode(image_paths, batch_size=64, num_workers=self.num_workers)
 
-        # 7. Assembler en DataFrame Polars : ids + label + embeddings + tabulaires
+        # 7. Assembler en DataFrame Polars : ids + label + embeddings + tabulaires + text
         new_data = {
             "productid": productids_ordered,
             "imageid": imageids_ordered,
             "label": labels_ordered,
             "batch_id": batch_ids_ordered,
             "is_gold": is_gold_ordered,
+            "text": texts,  # texte nettoyé (déjà passé par clean_description plus haut)
         }
         for i in range(text_emb.shape[1]):
             new_data[f"text_feat_{i}"] = text_emb[:, i].tolist()
@@ -245,6 +267,159 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         print(f"[DataModule] Cache écrit : {len(full_df)} embeddings → {self.cache_path}")
 
     # --- setup : load + split stratifié -----------------------------------
+    def _setup_raw_for_finetune(self):
+        """
+        M.5 — Charge les données BRUTES directement de MongoDB (pas de cache parquet).
+    
+        Utilisé pour l'entraînement des base learners (TextCNN, ResNet50PartialFT).
+    
+        Colonnes exposées :
+        - productid, imageid : pour identifier les samples
+        - text : designation + description merged
+        - label : classe cible
+        - batch_id, is_gold : metadata pour filtrage
+    
+        Split :
+        - train_pool : batches autorisés, gold exclu (tous les samples dispos)
+        - val_selection : ~10% mis de côté pour arbitrer @active
+        - train_pool_effective : train_pool - val_selection
+        - train / val : split 80/20 stratifié sur train_pool_effective
+        """
+        logger.info("[DataModule._setup_raw_for_finetune] Chargement données brutes Mongo...")
+    
+        client = MongoClient(MONGO_URI)
+        db = client[DB_NAME]
+    
+        # 1. Charger X_raw_data_batches (texte + metadata)
+        x_docs = list(db["X_raw_data_batches"].find(
+            {},
+            {
+                "_id": 0,
+                "productid": 1,
+                "imageid": 1,
+                "designation": 1,
+                "description": 1,
+                "batch_id": 1,
+                "is_gold": 1,
+            }
+        ))
+        if self.limit is not None:
+            x_docs = x_docs[:self.limit]
+    
+        logger.info(f"[DataModule._setup_raw_for_finetune] {len(x_docs)} docs chargés depuis X_raw")
+    
+        # 2. Charger Y_raw_data_batches (labels)
+        productid_list = [d["productid"] for d in x_docs]
+        y_docs = list(db["Y_raw_data_batches"].find(
+            {"productid": {"$in": productid_list}},
+            {"_id": 0, "productid": 1, "prdtypecode": 1}
+        ))
+    
+        labels_map = {d["productid"]: d["prdtypecode"] for d in y_docs}
+        all_codes = sorted(
+            set(d["prdtypecode"] for d in db["Y_raw_data_batches"].find({}, {"prdtypecode": 1, "_id": 0}))
+        )
+        self._code_to_idx = {code: idx for idx, code in enumerate(all_codes)}
+        self._idx_to_code = {idx: code for code, idx in self._code_to_idx.items()}
+    
+        # 3. Assembler en DataFrame Polars
+        data = {
+            "productid": [],
+            "imageid": [],
+            "text": [],
+            "label": [],
+            "batch_id": [],
+            "is_gold": [],
+        }
+    
+        for doc in x_docs:
+            pid = doc["productid"]
+            if pid not in labels_map:
+                # Sample sans label : skip
+                continue
+        
+            designation = doc.get("designation") or ""
+            description = doc.get("description") or ""
+            full_text = f"{designation}. {description}" if description else designation
+        
+            data["productid"].append(pid)
+            data["imageid"].append(doc["imageid"])
+            data["text"].append(clean_description(full_text))
+            data["label"].append(self._code_to_idx[labels_map[pid]])
+            data["batch_id"].append(doc.get("batch_id"))
+            data["is_gold"].append(doc.get("is_gold", False))
+    
+        self._df_full = pl.DataFrame(data)
+        logger.info(f"[DataModule._setup_raw_for_finetune] DataFrame assemblé : {len(self._df_full)} samples")
+    
+        # 4. Résoudre val_selection version
+        self._val_selection_version = get_active_val_selection_version()
+        val_sel_col = f"is_val_selection_v{self._val_selection_version}"
+    
+        # Pour raw_for_finetune, on ne peut pas utiliser le val_selection versionné
+        # (il n'existe que dans le cache parquet). Fallback : créer un val_selection ad-hoc
+        # 10% aléatoire stratifié sur les labels.
+        n_total = len(self._df_full)
+        idx = np.arange(n_total)
+        labels = self._df_full.get_column("label").to_numpy()
+    
+        idx_pool, idx_val_sel = train_test_split(
+            idx,
+            test_size=0.10,
+            stratify=labels,
+            random_state=self.random_state,
+        )
+    
+        # 5. Appliquer les masks
+        mask_pool = pl.col("batch_id").is_in(self.train_batches)
+        if self.exclude_gold:
+            mask_pool = mask_pool & (~pl.col("is_gold"))
+    
+        self._df_train_pool = self._df_full.filter(mask_pool)
+    
+        # val_selection : intersection de pool + idx_val_sel
+        val_sel_productids = set(self._df_full[idx_val_sel.tolist()]["productid"].to_list())
+        mask_val_selection = mask_pool & pl.col("productid").is_in(val_sel_productids)
+        self._df_val_selection = self._df_full.filter(mask_val_selection)
+    
+        # train_pool_effective : pool - val_selection
+        mask_pool_effective = mask_pool & (~pl.col("productid").is_in(val_sel_productids))
+        self._df_train_pool_effective = self._df_full.filter(mask_pool_effective)
+    
+        # 6. Split train/val standard 80/20 sur train_pool_effective
+        n_pool_eff = len(self._df_train_pool_effective)
+        labels_pool_eff = self._df_train_pool_effective.get_column("label").to_numpy()
+        indices_pool_eff = np.arange(n_pool_eff)
+    
+        idx_train, idx_val = train_test_split(
+            indices_pool_eff,
+            test_size=self.val_size,
+            stratify=labels_pool_eff,
+            random_state=self.random_state,
+        )
+    
+        self._df_train = self._df_train_pool_effective[idx_train.tolist()]
+        self._df_val = self._df_train_pool_effective[idx_val.tolist()]
+    
+        # 7. Exposer colonnes (raw_for_finetune n'a pas d'embeddings)
+        self._text_cols = []
+        self._image_cols = []
+        self._tabular_cols = []
+    
+        # Log summary
+        n_total = len(self._df_full)
+        n_pool = len(self._df_train_pool)
+        n_pool_eff = len(self._df_train_pool_effective)
+        n_val_sel = len(self._df_val_selection)
+        n_gold = len(self._df_full.filter(pl.col("is_gold")))
+    
+        logger.info(
+            f"[DataModule._setup_raw_for_finetune] "
+            f"Total={n_total} | train_pool={n_pool} | train_pool_effective={n_pool_eff} | "
+            f"val_selection≈10%={n_val_sel} | gold={n_gold} | "
+            f"train={len(self._df_train)} | val={len(self._df_val)}"
+        )
+
 
     def setup(self, stage: str | None = None):
         """
@@ -257,7 +432,11 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         Le split train/val interne (pour early stopping en M3, par exemple) est
         un split 90/10 du train_pool, utilisé par les DataLoaders Lightning.
         """
-        if self.mode != "m2_embeddings":
+        if self.mode == "raw_for_finetune":
+            self._setup_raw_for_finetune()
+            return
+    
+        if self.mode not in ("m2_embeddings", "m2_benchmark"):
             raise NotImplementedError(f"setup pour mode={self.mode} non encore supporté")
 
         if not self.cache_path.exists():
@@ -268,15 +447,23 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         df = pl.read_parquet(self.cache_path)
 
         # Migration douce : si batch_id ou is_gold manquent, on les rapatrie depuis Mongo
-        missing_cols = [c for c in ("batch_id", "is_gold") if c not in df.columns]
+        missing_cols = [c for c in ("batch_id", "is_gold", "text") if c not in df.columns]
         if missing_cols:
             print(f"[DataModule] Cache sans {missing_cols}, migration auto depuis Mongo...")
             client = MongoClient(MONGO_URI)
             db = client[DB_NAME]
             pid_list = df.get_column("productid").to_list()
+            # On demande à Mongo uniquement les champs dont on a besoin
+            mongo_fields = {"_id": 0, "productid": 1}
+            if "batch_id" in missing_cols:
+                mongo_fields["batch_id"] = 1
+            if "is_gold" in missing_cols:
+                mongo_fields["is_gold"] = 1
+            if "text" in missing_cols:
+                mongo_fields["designation"] = 1
+                mongo_fields["description"] = 1
             mongo_docs = db["X_raw_data_batches"].find(
-                {"productid": {"$in": pid_list}},
-                {"_id": 0, "productid": 1, "batch_id": 1, "is_gold": 1},
+                {"productid": {"$in": pid_list}}, mongo_fields,
             )
             mapping = {d["productid"]: d for d in mongo_docs}
             new_cols = []
@@ -287,6 +474,16 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             if "is_gold" in missing_cols:
                 new_cols.append(
                     pl.Series("is_gold", [mapping.get(pid, {}).get("is_gold", False) for pid in pid_list])
+                )
+            if "text" in missing_cols:
+                def _build_text(pid):
+                    d = mapping.get(pid, {})
+                    designation = d.get("designation") or ""
+                    description = d.get("description") or ""
+                    full_text = f"{designation}. {description}" if description else designation
+                    return clean_description(full_text)
+                new_cols.append(
+                    pl.Series("text", [_build_text(pid) for pid in pid_list])
                 )
             df = df.with_columns(new_cols)
             df.write_parquet(self.cache_path)
@@ -306,37 +503,92 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self._tabular_cols = [c for c in df.columns if c.startswith("tab_")]
         self._df_full = df
 
-        # Train pool : batches autorisés AND not gold (ceinture + bretelles)
+        # ─────────────────────────────────────────────────────────────────────
+        # M.0 — Résolution du val_selection versionné
+        # ─────────────────────────────────────────────────────────────────────
+        self._val_selection_version = get_active_val_selection_version()
+        val_sel_col = f"is_val_selection_v{self._val_selection_version}"
+
+        if val_sel_col not in df.columns:
+            raise RuntimeError(
+                f"Colonne {val_sel_col!r} absente du cache parquet.\n"
+                f"Le val_selection_v{self._val_selection_version} n'a pas été initialisé.\n"
+                f"Action requise :\n"
+                f"    python src/data/init_val_selection.py --version {self._val_selection_version}\n"
+                f"puis relance ce DataModule."
+            )
+
+        # Niveau 1 — train_pool : batches autorisés AND not gold (inchangé)
+        # Utilisé par les assembled qui n'arbitrent pas @active (M2, M3, ...).
         mask_pool = pl.col("batch_id").is_in(self.train_batches)
         if self.exclude_gold:
             mask_pool = mask_pool & (~pl.col("is_gold"))
         self._df_train_pool = df.filter(mask_pool)
 
+        # Niveau 2a — val_selection : ~10% mis de côté pour arbitrer @active.
+        # Consommé uniquement par BaseLearnerExperiment.
+        mask_val_selection = mask_pool & pl.col(val_sel_col).cast(pl.Boolean)
+        self._df_val_selection = df.filter(mask_val_selection)
+
+        # Niveau 2b — train_pool_effective : sur-ensemble du split 80/20 standard.
+        # train_pool moins val_selection.
+        mask_pool_effective = mask_pool & (~pl.col(val_sel_col).cast(pl.Boolean))
+        self._df_train_pool_effective = df.filter(mask_pool_effective)
+
         n_total = df.height
         n_pool = self._df_train_pool.height
+        n_pool_eff = self._df_train_pool_effective.height
+        n_val_sel = self._df_val_selection.height
         n_gold = df.filter(pl.col("is_gold")).height
         n_shadow = n_total - n_pool - n_gold
         print(
-            f"[DataModule] Total={n_total} | train_pool={n_pool} "
-            f"(batches={self.train_batches}, gold_excluded={self.exclude_gold}) | "
-            f"gold={n_gold} | shadow={n_shadow}"
+            f"[DataModule] Total={n_total} | "
+            f"train_pool={n_pool} (batches={self.train_batches}, gold_excluded={self.exclude_gold}) "
+            f"| train_pool_effective={n_pool_eff} | val_selection_v{self._val_selection_version}={n_val_sel} "
+            f"| gold={n_gold} | shadow={n_shadow}"
         )
 
-        # Split train/val interne sur le pool (pour DataLoaders Lightning M3+)
-        labels_pool = self._df_train_pool.get_column("label").to_numpy()
-        indices_pool = np.arange(n_pool)
+        # Garde-fou : val_selection orthogonal à gold
+        n_leak_gold = df.filter(pl.col(val_sel_col).cast(pl.Boolean) & pl.col("is_gold")).height
+        if n_leak_gold != 0:
+            raise RuntimeError(
+                f"Bug critique : {n_leak_gold} samples sont à la fois val_selection_v"
+                f"{self._val_selection_version} ET gold. Cache parquet corrompu."
+            )
+
+        # Niveau 3 — split train/val standard 80/20 stratifié sur train_pool_effective.
+        # Sert : - aux BaseLearners deep (via X_val/y_val passés à fit())
+        #        - aux DataLoaders Lightning (train_dataloader/val_dataloader)
+        labels_pool_eff = self._df_train_pool_effective.get_column("label").to_numpy()
+        indices_pool_eff = np.arange(n_pool_eff)
         idx_train, idx_val = train_test_split(
-            indices_pool,
+            indices_pool_eff,
             test_size=self.val_size,
-            stratify=labels_pool,
+            stratify=labels_pool_eff,
             random_state=self.random_state,
         )
-        self._df_train = self._df_train_pool[idx_train.tolist()]
-        self._df_val = self._df_train_pool[idx_val.tolist()]
+        self._df_train = self._df_train_pool_effective[idx_train.tolist()]
+        self._df_val = self._df_train_pool_effective[idx_val.tolist()]
         print(
-            f"[DataModule] Split du train_pool : train={len(self._df_train)}, "
-            f"val={len(self._df_val)} (val_size={self.val_size})"
+            f"[DataModule] Split standard du train_pool_effective : "
+            f"train={len(self._df_train)}, val={len(self._df_val)} (val_size={self.val_size})"
         )
+        
+        # M.7 — Charger les caches base learners si mode=m2_benchmark
+        if self.mode == "m2_benchmark":
+            logger.info("[DataModule.M7] Mode m2_benchmark : chargement caches base learners...")
+            self._base_learner_caches = {}
+            for learner_name in ("textcnn", "resnet50_partial_ft"):
+                try:
+                    df_cache = self._load_base_learner_embeddings(learner_name)
+                    self._base_learner_caches[learner_name] = df_cache
+                    logger.info(f"[DataModule.M7] ✓ Loaded {learner_name} cache ({len(df_cache)} samples)")
+                except FileNotFoundError as e:
+                    logger.warning(f"[DataModule.M7] ✗ {learner_name} cache not found: {e}")
+                    raise
+                except RuntimeError as e:
+                    logger.error(f"[DataModule.M7] ✗ {learner_name} guard-fou failed: {e}")
+                    raise
 
     # --- Interface Lightning (DataLoaders pour M3/M4) ---------------------
 
@@ -364,55 +616,187 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
 
     # --- Interface principale (M2 sklearn + évaluations) ------------------
     def get_sklearn_data(
-        self, split: Literal["train", "val"]
+        self,
+        split: Literal["train", "val", "train_pool", "train_pool_effective", "val_selection"],
+        include_raw: bool = False,
     ) -> tuple[pl.DataFrame, np.ndarray]:
         """
-        Retourne (X, y) du split interne 90/10 du train_pool.
-
-        - "train" : 90% du pool, utilisé pour fit (en M2 le K-Fold consomme ça)
-        - "val" : 10% du pool, utilisé pour diagnostics post-fit (calibration,
-                  confusion, stacking analysis). Ce n'est PAS du test métier.
-
-        Pour le test métier (gold) ou observer la généralisation à des données
-        futures (shadow batches), utiliser get_eval_data().
+        Retourne (X, y) selon le split demandé.
+ 
+        Splits standard d'entraînement (80/20 stratifié sur train_pool_effective) :
+        - "train" : 80% pour fit (consommé par BaseLearner.fit(X_train, y_train, ...))
+        - "val"   : 20% pour validation interne (early stopping, monitor)
+ 
+        Splits "structurels" (sans tirage aléatoire) :
+        - "train_pool" : tout sauf gold (assembled qui n'arbitrent pas @active)
+        - "train_pool_effective" : tout sauf gold ni val_selection
+        - "val_selection" : les ~10% mis de côté pour arbitrer les promotions @active
+ 
+        Pour gold ou shadow batches, utiliser get_eval_data().
+ 
+        Args:
+            include_raw: si True, ajoute les colonnes 'text', 'imageid', 'productid'
+                         au DataFrame. Utile pour les BaseLearners non-frozen
+                         (TextCNN, ResNet50PartialFT, etc.).
         """
         if self._df_train is None or self._df_val is None:
             raise RuntimeError("setup() doit être appelé avant get_sklearn_data()")
-
-        df_map = {"train": self._df_train, "val": self._df_val}
+        df_map = {
+            "train": self._df_train,
+            "val": self._df_val,
+            "train_pool": self._df_train_pool,
+            "train_pool_effective": self._df_train_pool_effective,
+            "val_selection": self._df_val_selection,
+        }
         if split not in df_map:
             raise ValueError(
-                f"split={split} non supporté. Utiliser 'train' ou 'val' pour le "
-                "split interne du pool, ou get_eval_data('gold'/'shadow') pour "
-                "l'évaluation métier."
+                f"split={split!r} non supporté. Valides : {list(df_map.keys())}. "
+                f"Pour gold ou shadow, utiliser get_eval_data()."
             )
-
         feat_cols = self._text_cols + self._image_cols + self._tabular_cols
+        if include_raw:
+            feat_cols = feat_cols + ["text", "imageid", "productid"]
         X = df_map[split].select(feat_cols)
         y = df_map[split].get_column("label").to_numpy()
         return X, y
-    
-    def get_train_pool(self) -> tuple[pl.DataFrame, np.ndarray]:
+
+    def _load_base_learner_embeddings(self, learner_name: str) -> pl.DataFrame:
+        """
+        M.7 — Charge le cache parquet d'un base learner avec validation guard-fou.
+ 
+            Valide que le cache a été produit par la version @active courante du modèle.
+ 
+        Args:
+            learner_name: "textcnn", "resnet50_partial_ft", etc.
+ 
+        Returns:
+            DataFrame avec les colonnes d'embeddings du learner.
+ 
+        Raises:
+            FileNotFoundError: cache inexistant
+            RuntimeError: désync entre cache et MLflow @active
+        """
+   
+ 
+        # Résoudre le chemin du cache
+        cache_filename = (
+            f"embeddings_{learner_name}_"
+            f"v{self._val_selection_version}.parquet"
+        )
+        cache_path = CACHE_DIR / cache_filename
+ 
+        # 1. Vérifier que le cache existe
+        if not cache_path.exists():
+            raise FileNotFoundError(
+                f"Cache base learner introuvable : {cache_path}\n"
+                f"Action requise :\n"
+                f"    python -m src.experiments.runner "
+                f"--experiment base_learner_{learner_name} "
+                f"--action fit_base_learner"
+            )
+ 
+        # 2. Lire le cache
+        df_cache = pl.read_parquet(cache_path)
+        logger.debug(
+            f"[DataModule.M7._load_base_learner_embeddings] "
+            f"Cache chargé : {cache_path} ({len(df_cache)} samples)"
+        )
+ 
+        # 3. Vérifier les métadonnées de traçabilité
+        if "source_model_name" not in df_cache.columns:
+            raise ValueError(
+                f"Cache {cache_filename} corrompu : colonne 'source_model_name' manquante"
+            )
+        if "source_model_version" not in df_cache.columns:
+            raise ValueError(
+                f"Cache {cache_filename} corrompu : colonne 'source_model_version' manquante"
+            )
+ 
+        # 4. Vérifier unicité
+        unique_names = df_cache.get_column("source_model_name").unique().to_list()
+        unique_versions = (
+            df_cache.get_column("source_model_version").unique().to_list()
+        )
+ 
+        if len(unique_names) > 1:
+            raise RuntimeError(
+                f"Cache {cache_filename} hétérogène : "
+                f"multiple source_model_name = {unique_names}"
+            )
+        if len(unique_versions) > 1:
+            raise RuntimeError(
+                f"Cache {cache_filename} hétérogène : "
+                f"multiple source_model_version = {unique_versions}"
+            )
+ 
+        source_model_name = unique_names[0]
+        source_model_version = int(unique_versions[0])
+ 
+        # 5. Guard-fou : vérifier @active en MLflow
+        client = mlflow.tracking.MlflowClient()
+        try:
+            active_mv = client.get_model_version_by_alias(source_model_name, "active")
+            active_version = int(active_mv.version)
+        except mlflow.exceptions.MlflowException as e:
+            raise RuntimeError(
+                f"Modèle {source_model_name} n'a pas d'alias @active en MLflow. "
+                f"Guard-fou M.7 échoue.\n"
+                f"Lancer fit_base_learner pour {learner_name} d'abord."
+            ) from e
+ 
+        # 6. Comparaison : version du cache vs @active courant
+        if source_model_version != active_version:
+            raise RuntimeError(
+                f"DESYNC CRITIQUE — Cache vs MLflow @active :\n"
+                f"Cache {cache_filename}:\n"
+                f"source_model_name: {source_model_name}\n"
+                f"source_model_version: {source_model_version}\n"
+                f"MLflow @active:\n"
+                f"{source_model_name} @active v{active_version}\n"
+                f"\n"
+                f"Action :\n"
+                f"    python -m src.experiments.runner "
+                f"--experiment base_learner_{learner_name} "
+                f"--action fit_base_learner"
+            )
+ 
+        logger.debug(
+            f"[DataModule.M7._load_base_learner_embeddings] "
+            f"Guard-fou OK : {source_model_name} v{active_version} @active"
+        )
+ 
+        return df_cache
+
+    def get_train_pool(self, include_raw: bool = False) -> tuple[pl.DataFrame, np.ndarray]:
         """
         Retourne (X, y) du pool d'entraînement : batches autorisés, gold exclu.
         Chaque algo gère son propre split interne (K-Fold pour M2, train/val pour M3).
+
+        Args:
+            include_raw: si True, ajoute 'text', 'imageid', 'productid' au DataFrame.
         """
         if self._df_train_pool is None:
             raise RuntimeError("setup() doit être appelé avant get_train_pool()")
         feat_cols = self._text_cols + self._image_cols + self._tabular_cols
+        if include_raw:
+            feat_cols = feat_cols + ["text", "imageid", "productid"]
         X = self._df_train_pool.select(feat_cols)
         y = self._df_train_pool.get_column("label").to_numpy()
         return X, y
 
     def get_eval_data(
-        self,
-        kind: Literal["gold", "shadow"],
-        batch_id: int | None = None,
+    self,
+    kind: Literal["gold", "shadow"],
+    batch_id: int | None = None,
+    include_raw: bool = False,
     ) -> tuple[pl.DataFrame, np.ndarray]:
         """
         Retourne (X, y) pour évaluation.
         - "gold" : test set transverse (arbitre @champion)
         - "shadow" : batch hors train_batches (simule nouvelles données arrivées)
+
+        Args:
+            include_raw: si True, ajoute 'text', 'imageid', 'productid' au DataFrame.
         """
         if self._df_full is None:
             raise RuntimeError("setup() doit être appelé avant get_eval_data()")
@@ -437,9 +821,11 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             raise ValueError(f"Ensemble eval ({kind}, batch_id={batch_id}) vide")
 
         feat_cols = self._text_cols + self._image_cols + self._tabular_cols
+        if include_raw:
+            feat_cols = feat_cols + ["text", "imageid", "productid"]
         X = df_eval.select(feat_cols)
         y = df_eval.get_column("label").to_numpy()
-        print(f"[DataModule] get_eval_data({kind}, batch_id={batch_id}) : n={len(y)}")
+        print(f"[DataModule] get_eval_data({kind}, batch_id={batch_id}, include_raw={include_raw}) : n={len(y)}")
         return X, y
 
     # --- Properties pour exposer les listes de colonnes -------------------
@@ -471,3 +857,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         return sorted(
             self._df_full.get_column("batch_id").drop_nulls().unique().to_list()
         )
+    
+
+
+    

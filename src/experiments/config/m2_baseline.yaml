@@ -1,0 +1,37 @@
+# Configuration M2 baseline (nouvelle architecture modulaire Phase 1)
+# Reproduction de M2 v4 via CamembertFrozen + ResNet18Frozen + StackingLGBM
+datamodule:
+  mode: m2_embeddings
+  text_model: dangvantuan/sentence-camembert-base
+  image_model: resnet18
+  cache_version: 1
+  batch_size: 64
+  num_workers: 4
+  val_size: 0.10
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+
+model:
+  n_classes: 27
+  n_folds: 5
+  n_trials: 30
+  random_state: 42
+  n_jobs_optuna: 4
+
+mlflow:
+  experiment_name: M2_baseline_phase1
+  run_name: M2_baseline_modular_v1
+  tracking_uri: http://mlflow:5000
+  tags:
+    model_family: M2
+    model_variant: baseline
+    base_text: camembert_frozen
+    base_image: resnet18_frozen
+    architecture: stacking_logreg_lgbm
+    phase: phase_1_refactor
+    exp_id: l5_reproduction_test
+
+promotion:
+  registry_model_name: "rakuten-m2-stacking"
+  epsilon: 0.005

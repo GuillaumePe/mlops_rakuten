@@ -3,14 +3,22 @@ Interface BaseLearner : contrat commun pour tous les base learners
 (texte, image, tabulaire) consommés par les modèles assemblés Phase 1.
 
 Cycle de vie standard :
-1. fit(X, y, val_split) : training avec early stopping interne pour les deep learners,
-   fit direct pour les sklearn-style. Idempotent : appeler fit() deux fois écrase
-   l'état précédent.
+1. fit(X_train, y_train, X_val, y_val) : training avec early stopping interne
+   pour les deep learners, fit direct pour les sklearn-style. Idempotent :
+   appeler fit() deux fois écrase l'état précédent. Les frozen learners
+   ignorent X_val/y_val (passe-plats).
 2. extract_embeddings(X) : forward pass en mode eval, retourne (n, embed_dim).
    Reproductible : appel deux fois sur la même entrée → même sortie (model.eval()
    + torch.no_grad() pour les deep).
 3. (optionnel) predict_proba(X) : probabilités softmax (n, n_classes), utilisé
    par StackingLGBM pour générer les meta-features OOF.
+
+Persistance (M.4bis) :
+4. save_pretrained(path) : sérialise tout l'état (state_dict + métadonnées Python)
+   pour que from_pretrained(path) puisse reconstruire un learner fonctionnellement
+   identique. API conçue pour s'intégrer avec mlflow.pyfunc.log_model via
+   src/models/base_learners/_pyfunc_wrapper.py::BaseLearnerPyfunc.
+5. from_pretrained(cls, path) : classmethod inverse exacte de save_pretrained.
 
 Stratégie de fit pour les deep base learners :
 - Single train/val split (80/20), early stopping patience configurable
@@ -96,25 +104,53 @@ class BaseLearner(ABC):
     @abstractmethod
     def fit(
         self,
-        X: pl.DataFrame,
-        y: np.ndarray,
-        val_split: float = 0.2,
+        X_train: pl.DataFrame,
+        y_train: np.ndarray,
+        X_val: pl.DataFrame | None = None,
+        y_val: np.ndarray | None = None,
+        **kwargs,
     ) -> "BaseLearner":
         """
         Entraîne le base learner.
 
         Args:
-            X: DataFrame avec les colonnes brutes nécessaires à la modalité.
-            y: labels encodés [0..n_classes-1], shape (n,).
-            val_split: fraction du train à réserver pour validation
-                (utilisée par les deep learners pour l'early stopping).
-                Ignoré par les learners sklearn-style sans early stopping.
+            X_train: DataFrame d'entraînement avec colonnes brutes selon modalité.
+            y_train: labels encodés [0..n_classes-1], shape (len(X_train),).
+            X_val: DataFrame de validation (optionnel). Si fourni, utilisé par
+                les deep learners pour l'early stopping et le monitoring.
+                Les frozen learners ignorent cet argument.
+            y_val: labels de validation, shape (len(X_val),). Doit être fourni
+                si X_val l'est.
+			**kwargs: paramètres optionnels passés par l'orchestrateur
+                (BaseLearnerExperiment). Convention M.0a :
+                  - lightning_logger (pl.loggers.Logger | None) :
+                      logger Lightning à utiliser pour les métriques par epoch
+                      (train_loss, val_loss, val_f1_weighted, learning_rate, ...).
+                      Si fourni, les deep learners le passent à leur Trainer.
+                      Les frozen learners l'ignorent.
+                      Permet à BaseLearnerExperiment de créer un MLFlowLogger
+                      lié au run MLflow actif, garantissant que les métriques
+                      Lightning atterrissent dans le même run que les métriques
+                      val_selection (single source of truth).
+                Les kwargs inconnus DOIVENT être ignorés silencieusement (pas
+                de TypeError) pour permettre l'évolution du contrat sans
+                casser les learners existants.                
 
         Returns:
             self (chaînable).
 
         Raises:
-            ValueError: si X ne contient pas les colonnes attendues pour la modalité.
+            ValueError: si X_train ne contient pas les colonnes attendues,
+                ou si (X_val is None) XOR (y_val is None).
+
+        Convention sur le split (M.0) :
+            Le DataModule fournit en standard un split 80/20 stratifié seed=42
+            sur train_pool_effective. Le call-site typique :
+                X_train, y_train = dm.get_sklearn_data("train")
+                X_val,   y_val   = dm.get_sklearn_data("val")
+                learner.fit(X_train, y_train, X_val, y_val)
+            En notebook exploratoire, fit(X, y) reste valide grâce aux défauts
+            None ; les deep learners utilisent alors un fallback interne.
         """
 
     @abstractmethod
@@ -154,29 +190,91 @@ class BaseLearner(ABC):
         )
 
     # ------------------------------------------------------------------ #
-    # Persistance (à surcharger ou utiliser pickle par défaut)            #
+    # Persistance legacy (M.0) — concrète, NotImplementedError par défaut #
     # ------------------------------------------------------------------ #
 
-    @abstractmethod
     def save(self, path: str | Path) -> None:
         """
-        Sérialise l'état du learner sur disque.
+        [LEGACY M.0] Sérialise l'état du learner sur disque.
 
-        Doit sauvegarder :
-        - Poids du modèle (deep) ou pipeline sklearn fitté
-        - Tokenizers, vocabulaires, transforms si applicable
-        - Métadonnées suffisantes pour load() sans paramètres externes
+        Non recommandé pour les nouveaux développements. Préférer
+        save_pretrained() qui est compatible PyFunc / MLflow registry.
+
+        Maintenu pour compat ascendante avec ResNet18Frozen / CamembertFrozen
+        qui ont peut-être leur propre format texte (cf. ResNet18Frozen.save).
         """
+        raise NotImplementedError(
+            f"{self.__class__.__name__}.save() non implémenté. "
+            "Utiliser save_pretrained() pour la nouvelle API PyFunc-compatible."
+        )
 
-    @abstractmethod
     def load(self, path: str | Path) -> "BaseLearner":
         """
-        Charge l'état depuis disque. Retourne self.
+        [LEGACY M.0] Charge l'état depuis disque. Retourne self.
 
-        Doit être l'inverse exact de save() : après load(), le learner doit
-        être dans le même état qu'après fit() initial (extract_embeddings
-        produit les mêmes valeurs).
+        Inverse de save(). Non recommandé pour les nouveaux développements,
+        préférer from_pretrained() (classmethod).
         """
+        raise NotImplementedError(
+            f"{self.__class__.__name__}.load() non implémenté. "
+            "Utiliser from_pretrained() (classmethod) pour la nouvelle API."
+        )
+
+    # ------------------------------------------------------------------ #
+    # Persistance PyFunc-compatible (M.4bis) — interface uniforme         #
+    # ------------------------------------------------------------------ #
+
+    def save_pretrained(self, path: str | Path) -> None:
+        """
+        Sauvegarde le BaseLearner de façon réversible dans `path`.
+
+        Le dossier `path` doit contenir tout ce qui est nécessaire pour
+        reconstruire le learner via `from_pretrained(path)` sans accès
+        à un état Python pré-existant :
+        - state_dict des nn.Module (poids appris)
+        - métadonnées de prétraitement (vocab, transforms args, etc.)
+        - hyperparamètres de construction (config JSON)
+
+        Convention : `path` peut être un dossier MLflow artifact, un chemin
+        local, ou un mount cloud. L'implémentation ne fait AUCUNE hypothèse
+        sur la persistence externe (DVC, R2, S3) — c'est le rôle de
+        BaseLearnerExperiment.
+
+        Conçu pour être consommé par
+        src/models/base_learners/_pyfunc_wrapper.py::BaseLearnerPyfunc
+        qui implémente mlflow.pyfunc.PythonModel.
+
+        Raises:
+            NotImplementedError: par défaut. À implémenter dans toute classe
+                concrète dont le state est non-trivial (TextCNN, ResNet50PartialFT,
+                CamembertLoRA, ResNet18FullFT).
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__}.save_pretrained() non implémenté. "
+            "Voir docstring BaseLearner.save_pretrained pour le contrat."
+        )
+
+    @classmethod
+    def from_pretrained(cls, path: str | Path) -> "BaseLearner":
+        """
+        Reconstruit le BaseLearner depuis `path` (écrit par save_pretrained).
+
+        Le learner retourné est en mode eval (model.eval() côté nn.Module)
+        et prêt pour extract_embeddings / predict_proba. Pas de fit() nécessaire.
+
+        Inverse exact de save_pretrained : la composition
+        `from_pretrained(p) ∘ save_pretrained(p)` doit être l'identité
+        fonctionnelle (les embeddings produits sur la même entrée doivent
+        être bit-à-bit identiques aux embeddings d'avant save).
+
+        Raises:
+            NotImplementedError: par défaut. À implémenter dans toute classe
+                concrète dont le state est non-trivial.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__}.from_pretrained() non implémenté. "
+            "Voir docstring BaseLearner.from_pretrained pour le contrat."
+        )
 
     # ------------------------------------------------------------------ #
     # Utilitaires                                                         #
