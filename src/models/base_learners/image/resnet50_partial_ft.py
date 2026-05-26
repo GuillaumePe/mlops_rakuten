@@ -432,8 +432,10 @@ class ResNet50PartialFT(BaseLearner):
         # Trainer
         callbacks = [
             EarlyStopping(
-                monitor="val_loss",
-                mode="min",
+#                monitor="val_loss",
+#                mode="min",
+                 monitor="val_f1_weighted",
+                 mode="max",
                 patience=self._patience,
                 verbose=True,
             ),

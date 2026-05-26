@@ -236,6 +236,8 @@ EXPERIMENT_BUILDERS = {
     "m2_baseline": build_m2_baseline_experiment,  # nouvelle archi modulaire Phase 1
     "base_learner_textcnn": build_base_learner_experiment,
     "base_learner_resnet50_partial_ft": build_base_learner_experiment,
+    "base_learner_camembert_lora": build_base_learner_experiment,
+    "base_learner_resnet18_full_ft": build_base_learner_experiment,
 
 }
 

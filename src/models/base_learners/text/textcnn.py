@@ -464,12 +464,12 @@ class TextCNN(BaseLearner):
             EarlyStopping(
 #                monitor="val_loss",
 #                mode="min",
-                 monitor="val_f1_weighted"
+                 monitor="val_f1_weighted",
                  mode="max",
                 patience=self._patience,
                 verbose=True,
             ),
-        ]monitor="val_f1_weighted", mode="max"
+        ]
         # M.1a : gradient clipping pour stabiliser les updates sur embedding
         # (init aléatoire → gradients potentiellement larges au début)
 

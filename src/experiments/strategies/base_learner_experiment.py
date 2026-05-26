@@ -139,7 +139,9 @@ class BaseLearnerExperiment:
         Factory pluggable (utile pour les tests ou l'extension).
         """
         from src.models.base_learners.text.textcnn import TextCNN
+        from src.models.base_learners.text.camembert_lora import CamembertLoRA
         from src.models.base_learners.image.resnet50_partial_ft import ResNet50PartialFT
+        from src.models.base_learners.image.resnet18_full_ft import ResNet18FullFT
 
         learner_builders = {
             "textcnn": lambda cfg: TextCNN(
@@ -151,6 +153,7 @@ class BaseLearnerExperiment:
                 dropout=cfg.get("dropout", 0.5),
                 lr=float(cfg.get("lr", 1e-3)),
                 weight_decay=float(cfg.get("weight_decay", 0.0)),
+                patience=cfg.get("patience", 3),
             ),
             "resnet50_partial_ft": lambda cfg: ResNet50PartialFT(
                 image_folder=str(self.data_folder / "images" / "image_train"),
@@ -164,6 +167,37 @@ class BaseLearnerExperiment:
                 num_workers=cfg.get("num_workers", 4),
                 random_state=cfg.get("random_state", 42),
                 precision=cfg.get("precision", "bf16-mixed"),
+            ),
+            "camembert_lora": lambda cfg: CamembertLoRA(
+                model_name=cfg.get("model_name", "camembert-base"),
+                n_classes=cfg.get("n_classes", 27),
+                max_len=cfg.get("max_len", 128),
+                lora_rank=cfg.get("lora_rank", 16),
+                lora_alpha=cfg.get("lora_alpha", 32),
+                lora_dropout=cfg.get("lora_dropout", 0.05),
+                batch_size=cfg.get("batch_size", 32),
+                max_epochs=cfg.get("max_epochs", 10),
+                patience=cfg.get("patience", 2),
+                lr_lora=float(cfg.get("lr_lora", 5e-4)),
+                lr_head=float(cfg.get("lr_head", 1e-3)),
+                weight_decay=float(cfg.get("weight_decay", 0.01)),
+                warmup_ratio=float(cfg.get("warmup_ratio", 0.1)),
+                num_workers=cfg.get("num_workers", 2),
+                random_state=cfg.get("random_state", 42),
+                precision=cfg.get("precision", "bf16-mixed"),
+            ),
+            "resnet18_full_ft": lambda cfg: ResNet18FullFT(
+                image_folder=str(self.data_folder / "images" / "image_train"),
+                n_classes=cfg.get("n_classes", 27),
+                batch_size=cfg.get("batch_size", 32),
+                max_epochs=cfg.get("max_epochs", 15),
+                patience=cfg.get("patience", 3),
+                lr=float(cfg.get("lr", 1e-4)),
+                weight_decay=float(cfg.get("weight_decay", 1e-4)),
+                num_workers=cfg.get("num_workers", 4),
+                random_state=cfg.get("random_state", 42),
+                precision=cfg.get("precision", "bf16-mixed"),
+                augmentation_level=cfg.get("augmentation_level", "medium"),
             ),
         }
 
