@@ -539,8 +539,8 @@ class CamembertLoRA(BaseLearner):
             max_epochs=self._max_epochs,
             callbacks=callbacks,
             precision=self._precision,
-            enable_checkpointing=lightning_logger if lightning_logger is not None else False,
-            logger=False,
+            enable_checkpointing=False,
+            logger=lightning_logger if lightning_logger is not None else False,
             log_every_n_steps=50,
         )
         trainer.fit(self.net, train_loader, val_loader)
