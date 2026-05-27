@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
+
+AugmentationLevel = Literal["soft", "medium", "hard"]
 import json
 import lightning as L
 import numpy as np
@@ -84,23 +86,59 @@ def _default_eval_transform():
     return models.ResNet50_Weights.IMAGENET1K_V2.transforms()
 
 
-def _default_train_transform():
-    """
-    Augmentation 'soft' alignée avec le benchmark Rakuten.
+_IMAGENET_NORMALIZE = transforms.Normalize(
+    mean=[0.485, 0.456, 0.406],
+    std=[0.229, 0.224, 0.225],
+)
 
-    Resize(232) + RandomResizedCrop(224, scale=0.85-1.0) + HFlip + normalize ImageNet.
-    Pas de color jitter ni de rotation, on reste fidèle à la reproduction benchmark.
+
+def _default_train_transform(level: AugmentationLevel = "soft") -> transforms.Compose:
     """
-    return transforms.Compose([
-        transforms.Resize(232),
-        transforms.RandomResizedCrop(224, scale=(0.85, 1.0)),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        ),
-    ])
+    Construit le transform d'augmentation train selon le niveau demandé.
+
+    - "soft"   : alignement benchmark Rakuten (défaut, rétro-compatible).
+        Resize(232) + RandomResizedCrop(224, 0.85-1.0) + HFlip + normalize.
+    - "medium" : géométrie modérée + couleur modérée.
+        Resize(232) + RandomResizedCrop(224, 0.75-1.0) + HFlip
+        + Rotation(10) + ColorJitter(0.2, 0.2, 0.1) + normalize.
+    - "hard"   : régularisation forte.
+        Resize(232) + RandomResizedCrop(224, 0.6-1.0) + HFlip
+        + Rotation(20) + Perspective(0.2, p=0.3)
+        + ColorJitter(0.4, 0.4, 0.3, 0.1)
+        + ToTensor + RandomErasing(p=0.25) + normalize.
+    """
+    if level == "soft":
+        return transforms.Compose([
+            transforms.Resize(232),
+            transforms.RandomResizedCrop(224, scale=(0.85, 1.0)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ToTensor(),
+            _IMAGENET_NORMALIZE,
+        ])
+    elif level == "medium":
+        return transforms.Compose([
+            transforms.Resize(232),
+            transforms.RandomResizedCrop(224, scale=(0.75, 1.0)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+            transforms.ToTensor(),
+            _IMAGENET_NORMALIZE,
+        ])
+    elif level == "hard":
+        return transforms.Compose([
+            transforms.Resize(232),
+            transforms.RandomResizedCrop(224, scale=(0.6, 1.0)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(20),
+            transforms.RandomPerspective(distortion_scale=0.2, p=0.3),
+            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.1),
+            transforms.ToTensor(),
+            transforms.RandomErasing(p=0.25),
+            _IMAGENET_NORMALIZE,
+        ])
+    else:
+        raise ValueError(f"augmentation_level inconnu: {level!r}. Choix: soft, medium, hard")
 
 
 # ====================================================================== #
@@ -279,6 +317,7 @@ class ResNet50PartialFT(BaseLearner):
         num_workers: int = 4,
         random_state: int = 42,
         precision: str = "bf16-mixed",
+        augmentation_level: AugmentationLevel = "soft",
         train_transform=None,   # torchvision.transforms.Compose (injectable)
         eval_transform=None,    # torchvision.transforms.Compose (injectable)
     ):
@@ -293,9 +332,19 @@ class ResNet50PartialFT(BaseLearner):
         self._num_workers = num_workers
         self._random_state = random_state
         self._precision = precision
+        self._augmentation_level = augmentation_level
 
-        self._train_transform = train_transform if train_transform is not None else _default_train_transform()
-        self._eval_transform = eval_transform if eval_transform is not None else _default_eval_transform()
+        if train_transform is not None:
+            self._train_transform = train_transform
+            self._uses_default_train_transform = False
+        else:
+            self._train_transform = _default_train_transform(augmentation_level)
+            self._uses_default_train_transform = True
+
+        self._eval_transform = (
+            eval_transform if eval_transform is not None else _default_eval_transform()
+        )
+        self._uses_default_eval_transform = eval_transform is None
 
         self.net: _ResNet50PartialFTLightning | None = None
 
@@ -551,8 +600,9 @@ class ResNet50PartialFT(BaseLearner):
             "num_workers": self._num_workers,
             "random_state": self._random_state,
             "precision": self._precision,
+            "augmentation_level": self._augmentation_level,
             # Flags transforms : info-only, pas exploité au reload
-            "_uses_default_train_transform": not custom_train,
+            "_uses_default_train_transform": self._uses_default_train_transform,
             "_uses_default_eval_transform": not custom_eval,
         }
         with open(path / "config.json", "w") as f:

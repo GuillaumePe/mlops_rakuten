@@ -23,10 +23,14 @@ learner:
     # Regularisation
     dropout: 0.5
     # Optimisation
-    lr: 1e-3
+    batch_size: 64
+    max_epochs: 20
+    lr: 5.0e-4
+    num_workers: 4
     weight_decay: 1e-2
-    patience: 5
-    max_epochs: 15
+    patience: 4
+    random_state: 42
+    precision: "bf16-mixed"
 
 mlflow:
   tracking_uri: "http://mlflow:5000"

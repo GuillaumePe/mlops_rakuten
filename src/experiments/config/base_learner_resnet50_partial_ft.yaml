@@ -14,20 +14,17 @@ datamodule:
 learner:
   name: "resnet50_partial_ft"
   config:
-    # Training
-    batch_size: 32
+    n_classes: 27
+    batch_size: 64
     max_epochs: 15
-    patience: 3
-    # Learning rates (differential)
-    lr_head: 1e-3
-    lr_backbone: 1e-5
-    # Regularisation
+    patience: 4
+    lr_head: 1.0e-3
+    lr_backbone: 1.0e-5
     weight_decay: 1e-2
-    # Hardware
     num_workers: 4
     random_state: 42
-    # Precision
     precision: "bf16-mixed"
+    augmentation_level: "hard"  
 
 mlflow:
   tracking_uri: "http://mlflow:5000"

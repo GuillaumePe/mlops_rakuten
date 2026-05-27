@@ -167,6 +167,7 @@ class BaseLearnerExperiment:
                 num_workers=cfg.get("num_workers", 4),
                 random_state=cfg.get("random_state", 42),
                 precision=cfg.get("precision", "bf16-mixed"),
+                augmentation_level=cfg.get("augmentation_level", "soft"),
             ),
             "camembert_lora": lambda cfg: CamembertLoRA(
                 model_name=cfg.get("model_name", "camembert-base"),
