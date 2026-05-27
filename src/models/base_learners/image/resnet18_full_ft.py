@@ -210,24 +210,18 @@ class _ResNet18FullFTLightning(L.LightningModule):
     def __init__(
         self,
         n_classes: int = 27,
-        lr: float = 1e-4,
-        weight_decay: float = 1e-4,
+        lr_head: float = 1e-3,
+        lr_backbone: float = 1e-5,
+        weight_decay: float = 1e-2,
     ):
         super().__init__()
-        #self.save_hyperparameters()
-
-        # Backbone ResNet18 pré-entraîné ImageNet1K_V1
         self.backbone = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
-
-        # Remplace la tête FC : 512 → n_classes
-        in_features = self.backbone.fc.in_features  # 512
+        in_features = self.backbone.fc.in_features
         self.backbone.fc = nn.Linear(in_features, n_classes)
-
-        # FULL FT : aucun freeze, tout est trainable
         for p in self.backbone.parameters():
             p.requires_grad = True
-
-        self.lr = lr
+        self.lr_head = lr_head
+        self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
 
         # Pour validation : accumuler predictions et labels par epoch
@@ -283,14 +277,38 @@ class _ResNet18FullFTLightning(L.LightningModule):
 
     def configure_optimizers(self):
         """
-        Un seul groupe d'optimisation (full FT cohérent).
-        AdamW : weight decay découplé (Loshchilov & Hutter 2019).
+        Deux groupes : backbone (LR faible, préserve ImageNet) et head
+        (LR forte, apprend de zéro). Même pattern que ResNet50PartialFT.
         """
-        return torch.optim.AdamW(
-            self.parameters(),
-            lr=self.lr,
+        head_params = list(self.backbone.fc.parameters())
+        head_param_ids = {id(p) for p in head_params}
+        backbone_params = [
+            p for p in self.backbone.parameters()
+            if p.requires_grad and id(p) not in head_param_ids
+        ]
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": backbone_params, "lr": self.lr_backbone},
+                {"params": head_params, "lr": self.lr_head},
+            ],
             weight_decay=self.weight_decay,
         )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.5,
+            patience=2,
+            min_lr=1e-6,
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val_loss",
+                "interval": "epoch",
+                "frequency": 1,
+            },
+        }
 
 
 # ====================================================================== #
@@ -330,7 +348,8 @@ class ResNet18FullFT(BaseLearner):
         batch_size: int = 32,
         max_epochs: int = 15,
         patience: int = 3,
-        lr: float = 1e-4,
+        lr_head: float = 1e-3,
+        lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
         num_workers: int = 4,
         random_state: int = 42,
@@ -344,7 +363,8 @@ class ResNet18FullFT(BaseLearner):
         self._batch_size = batch_size
         self._max_epochs = max_epochs
         self._patience = patience
-        self._lr = lr
+        self._lr_head = lr_head
+        self._lr_backbone = lr_backbone
         self._weight_decay = weight_decay
         self._num_workers = num_workers
         self._random_state = random_state
@@ -490,7 +510,8 @@ class ResNet18FullFT(BaseLearner):
         # Modèle Lightning
         self.net = _ResNet18FullFTLightning(
             n_classes=self._n_classes,
-            lr=self._lr,
+            lr_head=self._lr_head,
+            lr_backbone=self._lr_backbone,
             weight_decay=self._weight_decay,
         )
 
@@ -602,7 +623,8 @@ class ResNet18FullFT(BaseLearner):
             "batch_size": self._batch_size,
             "max_epochs": self._max_epochs,
             "patience": self._patience,
-            "lr": self._lr,
+            "lr_head": self._lr_head,
+            "lr_backbone": self._lr_backbone,
             "weight_decay": self._weight_decay,
             "num_workers": self._num_workers,
             "random_state": self._random_state,
@@ -685,7 +707,8 @@ class ResNet18FullFT(BaseLearner):
         # 5. Reconstruire le _ResNet18FullFTLightning
         instance.net = _ResNet18FullFTLightning(
             n_classes=instance._n_classes,
-            lr=instance._lr,
+            lr_head=instance._lr_head,
+            lr_backbone=instance._lr_backbone,
             weight_decay=instance._weight_decay,
         )
 

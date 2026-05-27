@@ -12,15 +12,16 @@ learner:
   name: "resnet18_full_ft"
   config:
     n_classes: 27
-    batch_size: 32
+    batch_size: 64              # marge VRAM sur RTX PRO 4500/5090
     max_epochs: 15
-    patience: 5
-    lr: 1.0e-4
+    patience: 3                 # couper plus tôt (overfitting dès epoch 4)
+    lr_head: 1.0e-3             # head random → LR élevé
+    lr_backbone: 1.0e-5         # couches pré-entraînées → LR 100× plus bas
     weight_decay: 1e-2
     num_workers: 4
     random_state: 42
     precision: "bf16-mixed"
-    augmentation_level: "medium"
+    augmentation_level: "hard" # ou implémenter RandAugment
 
 mlflow:
   tracking_uri: "http://mlflow:5000"
