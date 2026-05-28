@@ -73,7 +73,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
 
     def __init__(
         self,
-        mode: Literal["m2_embeddings", "raw_for_finetune", "m4_embeddings","m2_benchmark"] = "m2_embeddings",
+        mode: Literal["m2_embeddings", "raw_for_finetune", "m4_embeddings"] = "m2_embeddings",
         text_model: str = "dangvantuan/sentence-camembert-base",
         image_model: str = "resnet18",
         cache_version: int = 1,
@@ -84,6 +84,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         limit: int | None = None,
         train_batches: list[int] = (1, 2, 3),
         exclude_gold: bool = True,
+        extra_embedding_caches: list[str] | None = None,
     ):
         super().__init__()
         self.mode = mode
@@ -101,6 +102,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self.limit = limit
         self.train_batches = list(train_batches)
         self.exclude_gold = exclude_gold
+        self.extra_embedding_caches = list(extra_embedding_caches or [])
 
         # Chemin du cache, déterministe à partir des modèles + version
         # (n'existe pas pour raw_for_finetune)
@@ -120,6 +122,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self._text_cols: list[str] | None = None
         self._image_cols: list[str] | None = None
         self._tabular_cols: list[str] | None = None
+        self._extra_cols: list[str] = [] # colonnes d'embeddings des caches extra
 
         # Placeholders M.0 (val_selection versionné)
         self._df_train_pool_effective: pl.DataFrame | None = None
@@ -436,7 +439,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             self._setup_raw_for_finetune()
             return
     
-        if self.mode not in ("m2_embeddings", "m2_benchmark"):
+        if self.mode not in ("m2_embeddings"):
             raise NotImplementedError(f"setup pour mode={self.mode} non encore supporté")
 
         if not self.cache_path.exists():
@@ -502,6 +505,83 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self._image_cols = [c for c in df.columns if c.startswith("image_feat_")]
         self._tabular_cols = [c for c in df.columns if c.startswith("tab_")]
         self._df_full = df
+
+        # ─────────────────────────────────────────────────────────────────
+        # M.7 — Jointure des caches extra base learners
+        # ─────────────────────────────────────────────────────────────────
+        # Chaque cache parquet (produit par fit_base_learner) est jointé
+        # sur `productid` dans _df_full. Les colonnes d'embeddings se
+        # retrouvent alors dans tous les splits dérivés (train, val, etc.)
+        # → M2Assembled les consomme directement via _validate_columns().
+        self._extra_cols = []
+        if self.extra_embedding_caches:
+            logger.info(
+                f"[DataModule.M7] {len(self.extra_embedding_caches)} cache(s) extra à joindre"
+            )
+            for cache_filename in self.extra_embedding_caches:
+                cache_path = CACHE_DIR / cache_filename
+                if not cache_path.exists():
+                    raise FileNotFoundError(
+                        f"Cache extra introuvable : {cache_path}\n"
+                        f"Vérifier que le base learner a été entraîné et promu @active,\n"
+                        f"et que le parquet a été généré via fit_base_learner + DVC pull."
+                    )
+                df_extra = pl.read_parquet(cache_path)
+                logger.info(
+                    f"[DataModule.M7]   Chargé {cache_filename} : "
+                    f"{df_extra.shape[0]} samples, {df_extra.shape[1]} colonnes"
+                )
+ 
+                # Identifier les colonnes d'embeddings (convention {name}_feat_{i})
+                feat_cols_extra = [
+                    c for c in df_extra.columns
+                    if c.endswith(("_feat_0",)) or  # test rapide premier feat
+                    ("_feat_" in c and c.split("_feat_")[-1].isdigit())
+                ]
+                if not feat_cols_extra:
+                    raise ValueError(
+                        f"Cache {cache_filename} : aucune colonne *_feat_* trouvée. "
+                        f"Colonnes disponibles : {df_extra.columns[:10]}..."
+                    )
+ 
+                # Sélectionner uniquement productid + colonnes feat pour le join
+                join_cols = ["productid"] + feat_cols_extra
+                df_join = df_extra.select(
+                    [c for c in join_cols if c in df_extra.columns]
+                )
+ 
+                # Inner join sur productid — les samples absents du cache
+                # seront droppés (ex: gold si le cache n'a que train_pool).
+                n_before = self._df_full.height
+                self._df_full = self._df_full.join(
+                    df_join, on="productid", how="inner"
+                )
+                n_after = self._df_full.height
+                n_dropped = n_before - n_after
+ 
+                self._extra_cols.extend(feat_cols_extra)
+ 
+                logger.info(
+                    f"[DataModule.M7]   Jointé {len(feat_cols_extra)} colonnes "
+                    f"({feat_cols_extra[0]}..{feat_cols_extra[-1]}). "
+                    f"Samples : {n_before} → {n_after} "
+                    f"({n_dropped} droppés par inner join)"
+                )
+                if n_dropped > 0:
+                    logger.warning(
+                        f"[DataModule.M7]   ⚠ {n_dropped} samples droppés ! "
+                        f"Le cache {cache_filename} ne couvre pas tous les productids "
+                        f"du cache principal. Vérifier FIXME 2 dans base_learner_experiment.py."
+                    )
+ 
+            # Réassigner df pour la suite du setup (val_selection, splits, etc.)
+            df = self._df_full
+            logger.info(
+                f"[DataModule.M7] Jointure terminée. "
+                f"DataFrame final : {df.shape[0]} samples, {df.shape[1]} colonnes "
+                f"(dont {len(self._extra_cols)} colonnes extra)"
+            )
+
 
         # ─────────────────────────────────────────────────────────────────────
         # M.0 — Résolution du val_selection versionné
@@ -574,21 +654,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             f"train={len(self._df_train)}, val={len(self._df_val)} (val_size={self.val_size})"
         )
         
-        # M.7 — Charger les caches base learners si mode=m2_benchmark
-        if self.mode == "m2_benchmark":
-            logger.info("[DataModule.M7] Mode m2_benchmark : chargement caches base learners...")
-            self._base_learner_caches = {}
-            for learner_name in ("textcnn", "resnet50_partial_ft"):
-                try:
-                    df_cache = self._load_base_learner_embeddings(learner_name)
-                    self._base_learner_caches[learner_name] = df_cache
-                    logger.info(f"[DataModule.M7] ✓ Loaded {learner_name} cache ({len(df_cache)} samples)")
-                except FileNotFoundError as e:
-                    logger.warning(f"[DataModule.M7] ✗ {learner_name} cache not found: {e}")
-                    raise
-                except RuntimeError as e:
-                    logger.error(f"[DataModule.M7] ✗ {learner_name} guard-fou failed: {e}")
-                    raise
+
 
     # --- Interface Lightning (DataLoaders pour M3/M4) ---------------------
 
@@ -653,7 +719,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
                 f"split={split!r} non supporté. Valides : {list(df_map.keys())}. "
                 f"Pour gold ou shadow, utiliser get_eval_data()."
             )
-        feat_cols = self._text_cols + self._image_cols + self._tabular_cols
+        feat_cols = self._text_cols + self._image_cols + self._tabular_cols + self._extra_cols
         if include_raw:
             feat_cols = feat_cols + ["text", "imageid", "productid"]
         X = df_map[split].select(feat_cols)
@@ -777,7 +843,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         """
         if self._df_train_pool is None:
             raise RuntimeError("setup() doit être appelé avant get_train_pool()")
-        feat_cols = self._text_cols + self._image_cols + self._tabular_cols
+        feat_cols = self._text_cols + self._image_cols + self._tabular_cols + self._extra_cols
         if include_raw:
             feat_cols = feat_cols + ["text", "imageid", "productid"]
         X = self._df_train_pool.select(feat_cols)
@@ -820,12 +886,37 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         if df_eval.height == 0:
             raise ValueError(f"Ensemble eval ({kind}, batch_id={batch_id}) vide")
 
-        feat_cols = self._text_cols + self._image_cols + self._tabular_cols
+        feat_cols = self._text_cols + self._image_cols + self._tabular_cols + self._extra_cols
         if include_raw:
             feat_cols = feat_cols + ["text", "imageid", "productid"]
         X = df_eval.select(feat_cols)
         y = df_eval.get_column("label").to_numpy()
         print(f"[DataModule] get_eval_data({kind}, batch_id={batch_id}, include_raw={include_raw}) : n={len(y)}")
+        return X, y
+
+    def get_full_data(self, include_raw: bool = False) -> tuple[pl.DataFrame, np.ndarray]:
+        """
+        Retourne (X, y) sur l'INTÉGRALITÉ de _df_full (tous batches, gold inclus).
+ 
+        Usage principal : BaseLearnerExperiment._write_cache_parquet() pour
+        extraire les embeddings sur tous les productids, y compris gold et
+        val_selection. Garantit que le cache parquet produit couvre 100% des
+        samples → pas de perte au inner join dans le DataModule.
+ 
+        ⚠ NE PAS utiliser pour le training (fuite gold → val → train).
+        Uniquement pour l'extraction d'embeddings post-fit (model.eval()).
+ 
+        Args:
+            include_raw: si True, ajoute 'text', 'imageid', 'productid'.
+        """
+        if self._df_full is None:
+            raise RuntimeError("setup() doit être appelé avant get_full_data()")
+ 
+        feat_cols = self._text_cols + self._image_cols + self._tabular_cols + self._extra_cols
+        if include_raw:
+            feat_cols = feat_cols + ["text", "imageid", "productid"]
+        X = self._df_full.select(feat_cols)
+        y = self._df_full.get_column("label").to_numpy()
         return X, y
 
     # --- Properties pour exposer les listes de colonnes -------------------

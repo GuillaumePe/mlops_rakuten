@@ -14,18 +14,18 @@ learner:
   config:
     model_name: "camembert-base"
     n_classes: 27
-    max_len: 128
+    max_len: 300
     lora_rank: 16
-    lora_alpha: 32
-    lora_dropout: 0.05
-    batch_size: 32
+    lora_alpha: 16
+    lora_dropout: 0.1
+    batch_size: 64
     max_epochs: 10
-    patience: 5
-    lr_lora: 5.0e-4
+    patience: 3
+    lr_lora: 2.0e-4
     lr_head: 1.0e-3
     weight_decay: 0.01
     warmup_ratio: 0.1
-    num_workers: 2
+    num_workers: 4
     random_state: 42
     precision: "bf16-mixed"
 

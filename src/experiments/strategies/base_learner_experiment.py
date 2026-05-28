@@ -467,8 +467,8 @@ class BaseLearnerExperiment:
         source_model_version: int | None = None,
     ) -> None:
         """
-        Extract embeddings sur train_pool, construit un cache parquet
-        avec colonnes métadonnées + features, puis DVC push.
+        Extract embeddings sur _df_full (tous productids), construit un cache
+        parquet avec colonnes métadonnées + features, puis DVC push.
 
         Cache layout :
             productid, batch_id, is_gold, is_val_selection_v1..v_max,
@@ -482,12 +482,6 @@ class BaseLearnerExperiment:
             datamodule: RakutenLightningDataModule (setupé).
             source_model_version: version MLflow @active (REQUIS pour guard-fou M.7).
 
-        NOTE — FIXME 2 (limitation MVP) :
-            Actuellement on extract embeddings sur train_pool seulement.
-            En prod, il faudrait couvrir _df_full (train + gold + future).
-            Solution future : ajouter datamodule.get_full_data(include_raw=True).
-            Impact : M2Benchmark (M.9) réutilisera ces embeddings et doit avoir
-            tous les productids du parquet, y compris gold.
         """
         logger.info("[_write_cache_parquet] Début extract embeddings")
 
@@ -497,9 +491,12 @@ class BaseLearnerExperiment:
                 "_df_full non chargé. DataModule.setup() doit avoir été appelé."
             )
 
-        # Extract embeddings sur train_pool (cf. FIXME 2)
-        X_full, _ = datamodule.get_sklearn_data("train_pool", include_raw=True)
-        logger.info(f"  Extract embeddings sur {len(X_full)} samples")
+        # Extract embeddings sur _df_full (tous productids : train + gold + shadow)
+        # Corrige FIXME 2 : le cache doit couvrir 100% des samples pour éviter
+        # les pertes au inner join dans DataModule.setup() (extra_embedding_caches).
+        X_full, _ = datamodule.get_full_data(include_raw=True)
+        logger.info(f"  Extract embeddings sur {len(X_full)} samples (full coverage)")
+
         embeddings = self._learner.extract_embeddings(X_full)
         logger.info(f"  Shape embeddings : {embeddings.shape}")
 
@@ -515,18 +512,17 @@ class BaseLearnerExperiment:
             "source_model_version": source_model_version or 1,
         }
 
-        # Ajouter colonnes is_val_selection_v1..v_max (depuis df_full)
-        # Important : ces colonnes sont indexées par productid dans df_full,
-        # il faut un join pour récupérer seulement les rows de train_pool.
-        train_pool_pids = set(X_full["productid"].to_list())
-        df_meta = df_full.filter(pl.col("productid").is_in(train_pool_pids))
-        # Aligner sur l'ordre de X_full pour éviter les désordres
-        df_meta = df_meta.join(
-            pl.DataFrame({"productid": X_full["productid"].to_list(),
-                          "_order": list(range(len(X_full)))}),
+        # Ajouter colonnes is_val_selection_v1..v_max, is_gold, batch_id depuis df_full.
+        # X_full est issu de get_full_data() donc couvre 100% de df_full, dans le
+        # même ordre. On jointe quand même sur productid pour la robustesse.
+        all_pids = X_full["productid"].to_list()
+        df_meta = df_full.join(
+            pl.DataFrame({"productid": all_pids,
+                          "_order": list(range(len(all_pids)))}),
             on="productid",
             how="inner",
         ).sort("_order")
+
 
         for col in df_meta.columns:
             if col.startswith("is_val_selection_v"):

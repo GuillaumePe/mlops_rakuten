@@ -1,0 +1,53 @@
+# Configuration M2.1 — fine-tuning frugal Rakuten
+# CamemBERT LoRA + ResNet18 full FT + StackingLGBM
+#
+# Utilise M2Assembled (wrapper paramétrique).
+# Les embeddings sont pré-calculés par les base learners (Bloc N)
+# et cachés en parquet séparés.
+datamodule:
+  mode: m2_embeddings
+  text_model: dangvantuan/sentence-camembert-base
+  image_model: resnet18
+  cache_version: 1
+  batch_size: 64
+  num_workers: 4
+  val_size: 0.10
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+  extra_embedding_caches:
+    - embeddings_camembert_lora_v1.parquet
+    - embeddings_resnet18_full_ft_v1.parquet
+
+# --- Base learners (lu par build_m2_assembled_experiment) ---
+base_learners:
+  text:
+    name: camembert_lora
+    embed_dim: 768        # CamemBERT hidden size
+  image:
+    name: resnet18_full_ft
+    embed_dim: 512        # sortie avgpool ResNet18
+
+model:
+  n_classes: 27
+  n_folds: 5
+  n_trials: 30
+  random_state: 42
+  n_jobs_optuna: 4
+
+mlflow:
+  experiment_name: M2_frugal_ft_phase1
+  run_name: M2_frugal_camembert_lora_resnet18ft_v1
+  tracking_uri: http://mlflow:5000
+  tags:
+    model_family: M2.1
+    model_variant: frugal_ft
+    base_text: camembert_lora
+    base_image: resnet18_full_ft
+    architecture: stacking_logreg_lgbm
+    phase: phase_1_frugal_ft
+    exp_id: m21_frugal_ft
+
+promotion:
+  registry_model_name: "rakuten-m2-frugal-ft"
+  epsilon: 0.005
