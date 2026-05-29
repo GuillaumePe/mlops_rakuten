@@ -1,0 +1,44 @@
+# Configuration M2 best — meilleurs base learners par modalité
+# Résolution dynamique : le builder lit @active_text et @active_image
+# depuis MLflow pour déterminer le couple (text_learner, image_learner).
+#
+# Pas de section base_learners: — elle est résolue au runtime.
+datamodule:
+  mode: m2_embeddings
+  text_model: dangvantuan/sentence-camembert-base
+  image_model: resnet18
+  cache_version: 1
+  batch_size: 64
+  num_workers: 4
+  val_size: 0.10
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+  # extra_embedding_caches résolu dynamiquement par le builder
+
+# base_learners: DYNAMIC — résolu depuis @active_text / @active_image
+
+model:
+  n_classes: 27
+  n_folds: 5
+  n_trials: 30
+  random_state: 42
+  n_jobs_optuna: 4
+  logreg_C_text: 0.01    # régularisation L2 LogReg texte (défaut 0.01)
+  logreg_C_image: 0.1    # régularisation L2 LogReg image (défaut 0.1)
+
+
+mlflow:
+  experiment_name: M2_best_phase1
+  run_name: M2_best_auto_v1
+  tracking_uri: http://mlflow:5000
+  tags:
+    model_family: M2
+    model_variant: best_base_learners
+    architecture: stacking_logreg_lgbm
+    phase: phase_1
+    resolution: dynamic_active_aliases
+
+promotion:
+  registry_model_name: "rakuten-m2-best"
+  epsilon: 0.005

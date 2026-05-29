@@ -586,17 +586,17 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         # ─────────────────────────────────────────────────────────────────────
         # M.0 — Résolution du val_selection versionné
         # ─────────────────────────────────────────────────────────────────────
-        self._val_selection_version = get_active_val_selection_version()
         val_sel_col = f"is_val_selection_v{self._val_selection_version}"
-
         if val_sel_col not in df.columns:
-            raise RuntimeError(
-                f"Colonne {val_sel_col!r} absente du cache parquet.\n"
-                f"Le val_selection_v{self._val_selection_version} n'a pas été initialisé.\n"
-                f"Action requise :\n"
-                f"    python src/data/init_val_selection.py --version {self._val_selection_version}\n"
-                f"puis relance ce DataModule."
+            logger.warning(
+                f"[DataModule] {val_sel_col} absente du cache. "
+                f"val_selection indisponible — train_pool_effective = train_pool. "
+                f"OK pour SklearnExperiment (stacking), "
+                f"mais BaseLearnerExperiment échouera à l'eval."
             )
+            # Ajouter une colonne False partout pour que le reste du setup fonctionne
+            df = df.with_columns(pl.lit(False).alias(val_sel_col))
+            self._df_full = df
 
         # Niveau 1 — train_pool : batches autorisés AND not gold (inchangé)
         # Utilisé par les assembled qui n'arbitrent pas @active (M2, M3, ...).

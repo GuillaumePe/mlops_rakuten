@@ -36,6 +36,9 @@ model:
   n_trials: 30
   random_state: 42
   n_jobs_optuna: 4
+  logreg_C_text: 0.01    # régularisation L2 LogReg texte (défaut 0.01)
+  logreg_C_image: 0.1    # régularisation L2 LogReg image (défaut 0.1)
+
 
 mlflow:
   experiment_name: M2_benchmark_phase1

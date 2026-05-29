@@ -123,6 +123,9 @@ class M2Assembled:
         random_state: int = 42,
         n_jobs_optuna: int = 3,
         warm_start_params: dict | None = None,
+        logreg_C_text: float = 0.01,
+        logreg_C_image: float = 0.1,
+
     ):
         self.tabular_cols = tabular_cols
         self.n_classes = n_classes
@@ -149,6 +152,9 @@ class M2Assembled:
             random_state=random_state,
             n_jobs_optuna=n_jobs_optuna,
             warm_start_params=warm_start_params,
+            logreg_C_text=logreg_C_text,
+            logreg_C_image=logreg_C_image,
+
         )
 
     # ------------------------------------------------------------------ #
@@ -278,6 +284,9 @@ class M2Assembled:
             "text_embed_dim": self._text_embed_dim,
             "image_embed_dim": self._image_embed_dim,
             "n_tabular": len(self.tabular_cols),
+            "logreg_C_text": self.stacking.logreg_C_text,
+            "logreg_C_image": self.stacking.logreg_C_image,
+
         }
 
     def __repr__(self) -> str:

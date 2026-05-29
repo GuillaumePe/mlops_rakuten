@@ -33,6 +33,20 @@ from src.models.assembled.m2_assembled import M2Assembled
 import os
 
 
+
+# Registre des dimensions d'embeddings par base learner.
+# Utilisé par build_m2_best_experiment pour résoudre embed_dim
+# à partir du learner_name trouvé via @active_text/@active_image.
+LEARNER_EMBED_DIM = {
+    "textcnn": 3072,
+    "camembert_lora": 768,
+    "camembert_frozen": 768,
+    "resnet50_partial_ft": 2048,
+    "resnet18_full_ft": 512,
+    "resnet18_frozen": 512,
+}
+
+
 CONFIG_DIR = Path("src/experiments/config")
 
 
@@ -74,6 +88,59 @@ def get_local_tailscale_ip() -> str:
     if not ip.startswith("100."):
         raise RuntimeError(f"IP Tailscale inattendue : '{ip}' (devrait commencer par 100.)")
     return ip
+
+def resolve_active_base_learners(tracking_uri: str) -> dict:
+    """
+    Résout @active_text et @active_image depuis MLflow.
+ 
+    Returns:
+        {
+            "text": {"name": "camembert_lora", "embed_dim": 768, "version": 4},
+            "image": {"name": "resnet50_partial_ft", "embed_dim": 2048, "version": 8},
+            "extra_caches": ["embeddings_camembert_lora_v1.parquet", ...],
+        }
+    """
+    import mlflow
+    from src.models.utils import get_active_val_selection_version
+ 
+    mlflow.set_tracking_uri(tracking_uri)
+    client = mlflow.MlflowClient()
+    n_val = get_active_val_selection_version()
+ 
+    result = {}
+    for alias, modality in [("active_text", "text"), ("active_image", "image")]:
+        found = False
+        for rm in client.search_registered_models():
+            if not rm.name.startswith("rakuten-base-"):
+                continue
+            try:
+                mv = client.get_model_version_by_alias(rm.name, alias)
+                learner_name = rm.name.replace("rakuten-base-", "").replace("-", "_")
+                if learner_name not in LEARNER_EMBED_DIM:
+                    raise RuntimeError(
+                        f"Learner '{learner_name}' pas dans LEARNER_EMBED_DIM."
+                    )
+                result[modality] = {
+                    "name": learner_name,
+                    "embed_dim": LEARNER_EMBED_DIM[learner_name],
+                    "version": int(mv.version),
+                }
+                found = True
+                break
+            except mlflow.exceptions.MlflowException:
+                continue
+        if not found:
+            raise RuntimeError(
+                f"Aucun registered model n'a l'alias @{alias}. "
+                f"Lancer les base learners et vérifier les promotions."
+            )
+ 
+    result["extra_caches"] = [
+        f"embeddings_{result['text']['name']}_v{n_val}.parquet",
+        f"embeddings_{result['image']['name']}_v{n_val}.parquet",
+    ]
+    return result
+
 
 def build_m2_experiment(config: dict) -> tuple[RakutenLightningDataModule, SklearnExperiment]:
     """Assemble DataModule + M2Stacking + SklearnExperiment depuis une config M2."""
@@ -175,19 +242,45 @@ def build_m2_baseline_experiment(config: dict) -> tuple[RakutenLightningDataModu
 
 def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataModule, SklearnExperiment]:
     """
-    M.9 / N.5 — Assemble DataModule + M2Assembled + SklearnExperiment.
-
-    Builder générique pour tout stacking utilisant des base learners dont les
-    embeddings sont pré-calculés en parquet. Lit la section `base_learners`
-    du YAML pour résoudre (text_learner_name, text_embed_dim, image_learner_name,
-    image_embed_dim) → M2Assembled.
-
+    Builder générique pour M2Assembled.
+ 
+    Deux modes :
+      - YAML a base_learners: → lecture statique (m2_benchmark, m2_frugal_ft)
+      - YAML sans base_learners: → résolution dynamique @active_text/@active_image (m2_best)
+ 
     Configurations couvertes :
       - m2_benchmark  : TextCNN(3072) + ResNet50PartialFT(2048)
       - m2_frugal_ft  : CamembertLoRA(768) + ResNet18FullFT(512)
-      - toute future combinaison de base learners
+      - m2_best       : @active_text + @active_image (dynamique)
     """
     dm_cfg = config["datamodule"]
+    mlflow_cfg = config["mlflow"]
+ 
+    # Résoudre tracking URI (pour la résolution dynamique)
+    tracking_uri = (
+        os.getenv("MLFLOW_TRACKING_URI")
+        or mlflow_cfg.get("tracking_uri")
+        or "http://mlflow:5000"
+    )
+ 
+    # Résoudre les base learners : statique (YAML) ou dynamique (MLflow)
+    if "base_learners" in config:
+        bl_cfg = config["base_learners"]
+    else:
+        print("[build_m2_assembled] Pas de base_learners dans le YAML → résolution dynamique")
+        bl_info = resolve_active_base_learners(tracking_uri)
+        bl_cfg = {
+            "text": {"name": bl_info["text"]["name"], "embed_dim": bl_info["text"]["embed_dim"]},
+            "image": {"name": bl_info["image"]["name"], "embed_dim": bl_info["image"]["embed_dim"]},
+        }
+        # Injecter les caches dans la config datamodule
+        dm_cfg["extra_embedding_caches"] = bl_info["extra_caches"]
+        print(
+            f"[build_m2_assembled]   text  = {bl_cfg['text']['name']} ({bl_cfg['text']['embed_dim']}d, v{bl_info['text']['version']})\n"
+            f"[build_m2_assembled]   image = {bl_cfg['image']['name']} ({bl_cfg['image']['embed_dim']}d, v{bl_info['image']['version']})\n"
+            f"[build_m2_assembled]   caches = {dm_cfg['extra_embedding_caches']}"
+        )
+ 
     dm = RakutenLightningDataModule(
         mode=dm_cfg.get("mode", "m2_embeddings"),
         text_model=dm_cfg["text_model"],
@@ -202,10 +295,9 @@ def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataMod
         exclude_gold=dm_cfg.get("exclude_gold", True),
         extra_embedding_caches=dm_cfg.get("extra_embedding_caches", []),
     )
-
+ 
     model_cfg = config["model"]
-    bl_cfg = config["base_learners"]
-
+ 
     def m2_assembled_factory(_optuna_callback_unused):
         return M2Assembled(
             tabular_cols=dm.tabular_cols,
@@ -218,22 +310,28 @@ def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataMod
             n_trials=model_cfg.get("n_trials", 30),
             random_state=model_cfg.get("random_state", 42),
             n_jobs_optuna=model_cfg.get("n_jobs_optuna", 4),
-        )
+            logreg_C_text=model_cfg.get("logreg_C_text", 0.01),
+            logreg_C_image=model_cfg.get("logreg_C_image", 0.1),
 
+        )
+ 
     promotion_cfg = config.get("promotion", {})
     yaml_tags = config["mlflow"].get("tags", {})
     combined_tags = {
         **yaml_tags,
+        "base_text": bl_cfg["text"]["name"],
+        "base_image": bl_cfg["image"]["name"],
         "registry_model_name": promotion_cfg.get("registry_model_name", "rakuten-m2-assembled"),
         "promotion_epsilon": str(promotion_cfg.get("epsilon", 0.005)),
     }
-
+ 
     experiment = SklearnExperiment(
         model_factory=m2_assembled_factory,
         run_name=config["mlflow"]["run_name"],
         tags=combined_tags,
     )
     return dm, experiment
+
 
 def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataModule, BaseLearnerExperiment]:
     """
@@ -300,10 +398,12 @@ EXPERIMENT_BUILDERS = {
     "m2_baseline": build_m2_baseline_experiment,  # nouvelle archi modulaire Phase 1
     "m2_benchmark": build_m2_assembled_experiment,
     "m2_frugal_ft": build_m2_assembled_experiment,
+    "m2_best": build_m2_assembled_experiment,
     "base_learner_textcnn": build_base_learner_experiment,
     "base_learner_resnet50_partial_ft": build_base_learner_experiment,
     "base_learner_camembert_lora": build_base_learner_experiment,
     "base_learner_resnet18_full_ft": build_base_learner_experiment,
+    
 
 }
 

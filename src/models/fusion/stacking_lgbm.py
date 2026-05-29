@@ -71,6 +71,9 @@ class StackingLGBM:
         random_state: int = 42,
         n_jobs_optuna: int = 3,
         warm_start_params: dict | None = None,
+        logreg_C_text: float = 0.01,
+        logreg_C_image: float = 0.1,
+
     ):
         self.text_cols = text_cols
         self.image_cols = image_cols
@@ -81,29 +84,35 @@ class StackingLGBM:
         self.random_state = random_state
         self.n_jobs_optuna = n_jobs_optuna
         self.warm_start_params = warm_start_params
+        self.logreg_C_text = logreg_C_text
+        self.logreg_C_image = logreg_C_image
+
 
         # Templates des base learners (LogReg avec scaler).
-        # multinomial + lbfgs = MAP avec prior gaussien (L2 par défaut, C=1.0).
-        # Pas de class_weight : la cible Rakuten est F1 weighted, donc pas de
-        # raison de re-pondérer (le déséquilibre est intentionnellement préservé).
+        # multinomial + lbfgs = MAP avec prior gaussien N(0, C·I).
+        # C configurable : défaut C_text=0.01 (3072d, sous-déterminé),
+        # C_image=0.1 (2048d). Plus C est petit, plus la régularisation est forte.
+
+        # signal pour le LGBM méta. Le niveau 1 doit projeter, pas classifier.
         self._base_text_template = Pipeline([
             ("scaler", StandardScaler()),
             ("logreg", LogisticRegression(
+                C=self.logreg_C_text,
                 max_iter=2000,
                 solver="lbfgs",
-#                multi_class="multinomial",
                 n_jobs=-1,
             )),
         ])
         self._base_image_template = Pipeline([
             ("scaler", StandardScaler()),
             ("logreg", LogisticRegression(
+                C=self.logreg_C_image,
                 max_iter=2000,
                 solver="lbfgs",
-#                multi_class="multinomial",
                 n_jobs=-1,
             )),
         ])
+
 
         # Attributs remplis par fit()
         self.f_text_: Optional[Pipeline] = None

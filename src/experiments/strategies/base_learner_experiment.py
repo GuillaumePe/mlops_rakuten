@@ -429,37 +429,47 @@ class BaseLearnerExperiment:
             # 7. Si promu : alias @active + cascade + write parquet        #
             # ========================================================== #
             if should_promote:
-                # 7a. Set alias @active
-                client.set_registered_model_alias(
-                    registered_model_name, "active", latest_version
-                )
-                logger.info(f"[BaseLearnerExperiment.7a] Promu @active : v{latest_version}")
-
-                # 7b. Cascade @active_text / @active_image
-                logger.info("[BaseLearnerExperiment.7b] Cascade @active_text/image")
-                refresh_modality_alias(self._learner.modality)
-
-                # 7c. Write cache parquet (UNIQUEMENT si promu — invariant M.4bis)
-                logger.info(
-                    "[BaseLearnerExperiment.7c] Extract embeddings + write cache parquet "
-                    "(promu → invariant @active ↔ parquet)"
-                )
-                self._write_cache_parquet(
-                    datamodule, source_model_version=latest_version
-                )
+                promotion_success = False
+                try:
+                    # 7a. Set alias @active
+                    client.set_registered_model_alias(
+                        registered_model_name, "active", latest_version
+                    )
+                    logger.info(f"[BaseLearnerExperiment.7a] ✓ Promu @active : v{latest_version}")
+ 
+                    # 7b. Cascade @active_text / @active_image
+                    logger.info("[BaseLearnerExperiment.7b] Cascade @active_text/image")
+                    refresh_modality_alias(self._learner.modality)
+                    logger.info("[BaseLearnerExperiment.7b] ✓ Cascade OK")
+ 
+                    # 7c. Write cache parquet (UNIQUEMENT si promu — invariant M.4bis)
+                    logger.info(
+                        "[BaseLearnerExperiment.7c] Extract embeddings + write cache parquet"
+                    )
+                    self._write_cache_parquet(
+                        datamodule, source_model_version=latest_version
+                    )
+                    logger.info("[BaseLearnerExperiment.7c] ✓ Cache parquet écrit")
+                    promotion_success = True
+ 
+                except Exception as e:
+                    logger.error(
+                        f"[BaseLearnerExperiment.7] ✗ ERREUR bloc promotion !\n"
+                        f"  Exception : {type(e).__name__}: {e}\n"
+                        f"  Le modèle v{latest_version} est entraîné et loggé,\n"
+                        f"  mais l'alias @active et/ou le cache parquet peuvent être\n"
+                        f"  incohérents. Vérifier manuellement.",
+                        exc_info=True,
+                    )
+                    mlflow.log_param("promotion_error", f"{type(e).__name__}: {str(e)[:200]}")
+ 
+                mlflow.log_param("promotion_success", promotion_success)
             else:
                 logger.info(
                     f"[BaseLearnerExperiment.7] Non promu (gain < {threshold}). "
-                    f"Cache parquet conservé tel quel (correspond à @active actuel)."
+                    f"Cache parquet conservé tel quel."
                 )
 
-            total_duration_s = time.time() - start_time
-            mlflow.log_metric("total_duration_s", total_duration_s)
-
-        logger.info(
-            f"[BaseLearnerExperiment] Fit terminé en {total_duration_s:.1f}s "
-            f"(promoted={should_promote})"
-        )
 
     def _write_cache_parquet(
         self,
@@ -468,7 +478,7 @@ class BaseLearnerExperiment:
     ) -> None:
         """
         Extract embeddings sur _df_full (tous productids), construit un cache
-        parquet avec colonnes métadonnées + features, puis DVC push.
+        parquet avec colonnes métadonnées + features.
 
         Cache layout :
             productid, batch_id, is_gold, is_val_selection_v1..v_max,
@@ -547,25 +557,33 @@ class BaseLearnerExperiment:
         cache_df.write_parquet(cache_path)
         logger.info(f"  Cache écrit : {cache_path}")
 
-        # DVC push (optionnel, warning si pas dispo)
+                # ── Push vers R2 via boto3 (backup hors volume persistant) ───
+        # dvc add échoue sur le pod car data/cache est un symlink vers
+        # le volume persistant (DVC refuse les symlinked directories).
+        # On pousse directement sur R2 via boto3.
         try:
-            subprocess.run(
-                ["dvc", "add", str(cache_path)],
-                cwd=Path.cwd(),
-                check=True,
-                capture_output=True,
-                timeout=30,
-            )
-            subprocess.run(
-                ["dvc", "push"],
-                cwd=Path.cwd(),
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
-            logger.info("  DVC push OK")
+            import boto3
+ 
+            r2_endpoint = os.getenv("R2_ENDPOINT_URL")
+            r2_key = os.getenv("R2_ACCESS_KEY_ID") or os.getenv("AWS_ACCESS_KEY_ID")
+            r2_secret = os.getenv("R2_SECRET_ACCESS_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
+            r2_bucket = os.getenv("R2_BUCKET", "rakuten-mlops-dvc")
+ 
+            if not all([r2_endpoint, r2_key, r2_secret]):
+                logger.warning("  R2 credentials manquantes, skip push R2")
+            else:
+                s3 = boto3.client(
+                    "s3",
+                    endpoint_url=r2_endpoint,
+                    aws_access_key_id=r2_key,
+                    aws_secret_access_key=r2_secret,
+                )
+                r2_key_name = f"embedding_caches/{cache_filename}"
+                s3.upload_file(str(cache_path), r2_bucket, r2_key_name)
+                logger.info(f"  ✓ Push R2 OK : s3://{r2_bucket}/{r2_key_name}")
         except Exception as e:
-            logger.warning(f"  DVC push échoué (optionnel) : {e}")
+            logger.warning(f"  Push R2 échoué (non bloquant) : {type(e).__name__}: {e}")
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
