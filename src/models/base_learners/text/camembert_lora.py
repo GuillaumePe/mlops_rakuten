@@ -231,6 +231,24 @@ class _CamembertLoRALightning(L.LightningModule):
         outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
         return self._mean_pool(outputs.last_hidden_state, attention_mask)
 
+    def _token_level_features(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward jusqu'au last_hidden_state, AVANT mean pooling.
+ 
+        Returns:
+            tuple (last_hidden_state, attention_mask) :
+              - last_hidden_state : (B, seq_len, 768)
+              - attention_mask : (B, seq_len) — nécessaire pour masquer
+                le padding côté M3 (tokens pad ne doivent pas participer
+                à l'attention inter-modale)
+        """
+        outputs = self.backbone(
+            input_ids=input_ids, attention_mask=attention_mask
+        )
+        return outputs.last_hidden_state, attention_mask
+
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         """Forward complet → logits (B, n_classes)."""
         feats = self._features(input_ids, attention_mask)
@@ -585,6 +603,53 @@ class CamembertLoRA(BaseLearner):
     def predict_proba(self, X: pl.DataFrame) -> np.ndarray:
         """(n, 27) — softmax de la head sur les features pooled."""
         return self._forward_in_batches(X, return_features=False)
+
+    @property
+    def sequence_dim(self) -> int:
+        """768 — hidden_size du backbone CamemBERT-base."""
+        return 768
+    
+    def extract_token_embeddings(
+        self, X: pl.DataFrame
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        (n, max_len, 768) + (n, max_len) attention_mask.
+ 
+        Retourne le last_hidden_state complet avant mean pooling, ainsi que
+        l'attention_mask pour que M3 ignore les tokens de padding.
+ 
+        Returns:
+            (token_embeddings, attention_mask) :
+              - token_embeddings : np.ndarray float32 (n, max_len, 768)
+              - attention_mask   : np.ndarray int64   (n, max_len)
+                1 = token réel, 0 = padding
+        """
+        if self.net is None or self.tokenizer is None:
+            raise RuntimeError(
+                "CamembertLoRA.fit() ou from_pretrained() "
+                "doit être appelé avant extract_token_embeddings."
+            )
+ 
+        texts = self._extract_texts(X)
+        loader = self._make_loader(texts, labels=None, shuffle=False)
+        self.net.eval()
+        device = next(self.net.parameters()).device
+ 
+        all_hidden, all_masks = [], []
+        with torch.no_grad():
+            for batch in loader:
+                ids = batch["input_ids"].to(device, non_blocking=True)
+                mask = batch["attention_mask"].to(device, non_blocking=True)
+                hidden, mask = self.net._token_level_features(ids, mask)
+                all_hidden.append(hidden.cpu().numpy())
+                all_masks.append(mask.cpu().numpy())
+ 
+        return (
+            np.concatenate(all_hidden, axis=0).astype(np.float32),
+            np.concatenate(all_masks, axis=0).astype(np.int64),
+        )
+
+
 
     # ------------------------------------------------------------------ #
     # M.4bis — Persistance PyFunc-compatible                              #

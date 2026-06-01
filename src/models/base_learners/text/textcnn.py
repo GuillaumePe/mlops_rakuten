@@ -190,6 +190,36 @@ class _TextCNNLightning(L.LightningModule):
         feats = self.dropout(feats)
         return self.classifier(feats)
 
+    def _token_level_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward jusqu'aux feature maps des convolutions, AVANT max-pool.
+ 
+        Chaque Conv1d(kernel_size=k) produit (B, n_filters, L-k+1).
+        On pad chaque sortie à la longueur max (L, obtenue avec k=1),
+        puis on concat sur la dimension features.
+ 
+        Args:
+            x: (B, max_len) ids tokenisés
+ 
+        Returns:
+            (B, max_len, n_filters * len(kernel_sizes)) — ex: (B, 128, 3072)
+        """
+        emb = self.embedding(x)          # (B, L, embed_dim)
+        emb = emb.transpose(1, 2)        # (B, embed_dim, L)
+ 
+        max_len = x.size(1)
+        padded_maps = []
+ 
+        for conv in self.convs:
+            h = F.relu(conv(emb))        # (B, n_filters, L - k + 1)
+            pad_size = max_len - h.size(2)
+            if pad_size > 0:
+                h = F.pad(h, (0, pad_size))
+            padded_maps.append(h)
+ 
+        concat = torch.cat(padded_maps, dim=1)  # (B, n_filters * n_kernels, L)
+        return concat.transpose(1, 2)            # (B, L, n_filters * n_kernels)
+
     def training_step(self, batch, batch_idx):
         x, y = batch
         logits = self(x)
@@ -534,7 +564,52 @@ class TextCNN(BaseLearner):
         """(n, 27) — softmax du classifier final."""
         return self._forward_in_batches(X, return_features=False)
 
-        # ------------------------------------------------------------------ #
+    def extract_token_embeddings(
+        self, X: pl.DataFrame
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        (n, max_len, 3072) + (n, max_len) attention_mask.
+ 
+        Feature maps des 6 convolutions avant max-pool. Chaque position t
+        agrège les vues n-gram (kernel sizes 1..6), zéro-paddé en fin
+        pour les convs plus courtes.
+ 
+        Le mask est dérivé des input ids : position != PAD (id=0) → 1.
+ 
+        Returns:
+            (token_embeddings, attention_mask) :
+              - token_embeddings : np.ndarray float32 (n, max_len, 3072)
+              - attention_mask   : np.ndarray int64   (n, max_len)
+                1 = token réel, 0 = padding
+        """
+        if self.net is None or self.vocab is None:
+            raise RuntimeError(
+                "TextCNN.fit() ou from_pretrained() "
+                "doit être appelé avant extract_token_embeddings."
+            )
+ 
+        texts = self._extract_texts(X)
+        ids = _tokenize_and_pad(texts, self.vocab, self._max_len)
+        loader = self._make_loader(ids, labels=None, shuffle=False)
+        self.net.eval()
+        device = next(self.net.parameters()).device
+ 
+        all_features, all_masks = [], []
+        with torch.no_grad():
+            for batch in loader:
+                x, _ = batch
+                x = x.to(device, non_blocking=True)
+                feat = self.net._token_level_features(x)  # (B, L, 3072)
+                mask = (x != 0).long()                    # (B, L) — PAD=0
+                all_features.append(feat.cpu().numpy())
+                all_masks.append(mask.cpu().numpy())
+ 
+        return (
+            np.concatenate(all_features, axis=0).astype(np.float32),
+            np.concatenate(all_masks, axis=0).astype(np.int64),
+        )
+
+    # ------------------------------------------------------------------ #
     # M.4bis — Persistance PyFunc-compatible                              #
     # ------------------------------------------------------------------ #
  

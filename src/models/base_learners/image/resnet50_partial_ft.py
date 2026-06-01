@@ -207,6 +207,24 @@ class _ResNet50PartialFTLightning(L.LightningModule):
         x = self.backbone.avgpool(x)
         return torch.flatten(x, 1)  # (B, 2048)
 
+    def _spatial_feature_map(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward jusqu'à layer4, AVANT avgpool → (B, 49, 2048).
+ 
+        Même logique que ResNet18, mais 2048 channels (bottleneck ResNet50).
+        """
+        x = self.backbone.conv1(x)
+        x = self.backbone.bn1(x)
+        x = self.backbone.relu(x)
+        x = self.backbone.maxpool(x)
+        x = self.backbone.layer1(x)
+        x = self.backbone.layer2(x)
+        x = self.backbone.layer3(x)
+        x = self.backbone.layer4(x)  # (B, 2048, 7, 7)
+        B, C, H, W = x.shape
+        return x.reshape(B, C, H * W).permute(0, 2, 1)  # (B, 49, 2048)
+
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward complet → logits (B, n_classes)."""
         return self.backbone(x)
@@ -542,7 +560,38 @@ class ResNet50PartialFT(BaseLearner):
     def predict_proba(self, X: pl.DataFrame) -> np.ndarray:
         """(n, 27) — softmax du forward complet."""
         return self._forward_in_batches(X, return_features=False)
-        # ------------------------------------------------------------------ #
+
+    def extract_feature_map(self, X: pl.DataFrame) -> np.ndarray:
+        """
+        (n, 49, 2048) — feature map spatiale de layer4 avant avgpool.
+ 
+        Pas de mask : les 49 patches sont toujours valides.
+        """
+        if self.net is None:
+            raise RuntimeError(
+                "ResNet50PartialFT.fit() ou from_pretrained() "
+                "doit être appelé avant extract_feature_map."
+            )
+ 
+        image_paths = self._build_image_paths(X)
+        loader = self._make_loader(
+            image_paths, labels=None,
+            transform=self._eval_transform, shuffle=False,
+        )
+        self.net.eval()
+        device = next(self.net.parameters()).device
+ 
+        outputs = []
+        with torch.no_grad():
+            for batch in loader:
+                x, _ = batch
+                x = x.to(device, non_blocking=True)
+                feat = self.net._spatial_feature_map(x)  # (B, 49, 2048)
+                outputs.append(feat.cpu().numpy())
+ 
+        return np.concatenate(outputs, axis=0).astype(np.float32)
+
+    # ------------------------------------------------------------------ #
     # M.4bis — Persistance PyFunc-compatible                              #
     # ------------------------------------------------------------------ #
  
