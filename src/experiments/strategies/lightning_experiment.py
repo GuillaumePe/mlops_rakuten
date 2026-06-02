@@ -15,20 +15,19 @@ Responsabilités :
  
 Ce qui est DEHORS :
     - Construction du modèle (fait par le builder dans runner.py)
-    - Construction des DataLoaders (fait par le builder dans runner.py)
     - Chargement des base learners (fait par le builder dans runner.py)
-    - Preprocessing des données (fait par MultimodalDataset)
+    - Preprocessing M3 (configuré sur le DataModule par le builder)
+    - dm.setup() (fait dans cmd_fit_lightning, comme les autres cmd)
  
 Usage (depuis runner.py) :
+    # Builder
+    dm = RakutenLightningDataModule(...)
+    dm.set_m3_preprocessing(tokenizer, max_len, image_transform)
     model = M3AttentionFusion(text_net, image_net, d_text, d_image, config)
-    experiment = LightningExperiment(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        gold_loader=gold_loader,
-        gold_labels=y_gold,
-        config=config,
-    )
+    experiment = LightningExperiment(model=model, dm=dm, config=config)
+ 
+    # cmd
+    dm.setup()
     experiment.fit()
 """
 from __future__ import annotations
@@ -58,7 +57,6 @@ from sklearn.metrics import (
     f1_score,
     log_loss,
 )
-from torch.utils.data import DataLoader
  
 from src.experiments.strategies._metrics import expected_calibration_error
  
@@ -72,10 +70,8 @@ class LightningExperiment:
  
     Args:
         model: LightningModule (M3AttentionFusion ou tout futur modèle).
-        train_loader: DataLoader d'entraînement.
-        val_loader: DataLoader de validation (early stopping).
-        gold_loader: DataLoader du gold test set (évaluation transverse).
-        gold_labels: np.ndarray des labels gold (même ordre que gold_loader).
+        dm: DataModule déjà configuré (set_m3_preprocessing appelé).
+            setup() sera appelé par cmd_fit_lightning AVANT fit().
         config: dict de configuration complète (sera loggé en MLflow).
             Clés attendues :
             - trainer.max_epochs (int, default 30)
@@ -94,17 +90,12 @@ class LightningExperiment:
     def __init__(
         self,
         model: L.LightningModule,
-        train_loader: DataLoader,
-        val_loader: DataLoader,
-        gold_loader: DataLoader,
-        gold_labels: np.ndarray,
+        dm,
         config: dict,
     ):
+
         self.model = model
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.gold_loader = gold_loader
-        self.gold_labels = gold_labels
+        self.dm = dm
         self.config = config
  
         # --- Config shortcuts ---
@@ -135,14 +126,25 @@ class LightningExperiment:
     def fit(self) -> None:
         """
         Orchestre le cycle complet :
-            1. MLflow run
-            2. Trainer.fit (train + val avec early stopping)
-            3. Eval gold → métriques
-            4. Log model + artifacts
-            5. Promotion @champion conditionnelle
+            1. Récupérer les DataLoaders depuis le DataModule
+            2. MLflow run
+            3. Trainer.fit (train + val avec early stopping)
+            4. Eval gold → métriques
+            5. Log model + artifacts
+            6. Promotion @champion conditionnelle
+ 
+        Prérequis : dm.setup() doit avoir été appelé avant (par cmd_fit_lightning).
         """
+
         logger.info("[LightningExperiment] Démarrage fit")
         start_time = time.time()
+
+        # --- DataLoaders depuis le DataModule ---
+        train_loader = self.dm.train_dataloader()
+        val_loader = self.dm.val_dataloader()
+        gold_loader = self.dm.gold_dataloader()
+        gold_labels = self.dm.get_gold_labels()
+
  
         mlflow.set_tracking_uri(self.tracking_uri)
         mlflow.set_experiment(self.experiment_name)
@@ -161,7 +163,7 @@ class LightningExperiment:
             # ========================================================== #
             logger.info("[LightningExperiment.2] Trainer.fit")
             trainer = self._build_trainer(run_id)
-            trainer.fit(self.model, self.train_loader, self.val_loader)
+            trainer.fit(self.model, train_loader, val_loader)
             fit_duration = time.time() - start_time
             mlflow.log_metric("fit_duration_s", fit_duration)
             logger.info(f"  Fit terminé en {fit_duration:.1f}s")
@@ -170,6 +172,7 @@ class LightningExperiment:
             best_ckpt = trainer.checkpoint_callback.best_model_path
             if best_ckpt:
                 logger.info(f"  Best checkpoint: {best_ckpt}")
+                device = next(self.model.fusion.parameters()).device                
                 self.model = type(self.model).load_from_checkpoint(
                     best_ckpt,
                     text_net=self.model.text_net,
@@ -178,19 +181,20 @@ class LightningExperiment:
                     d_image=self.model.hparams.d_image,
                     config=self.model.hparams.config,
                 )
+                self.model = self.model.to(device)
  
             # ========================================================== #
             # 3. Eval gold                                                 #
             # ========================================================== #
             logger.info("[LightningExperiment.3] Eval gold")
-            y_pred, y_proba = self._predict_gold()
-            self._log_gold_metrics(self.gold_labels, y_pred, y_proba)
+            y_pred, y_proba = self._predict_gold(gold_loader)
+            self._log_gold_metrics(gold_labels, y_pred, y_proba)
  
             # ========================================================== #
             # 4. Log model + artifacts                                     #
             # ========================================================== #
             logger.info("[LightningExperiment.4] Log model + artifacts")
-            self._log_artifacts(self.gold_labels, y_pred)
+            self._log_artifacts(gold_labels, y_pred)
             n_params = sum(
                 p.numel() for p in self.model.fusion.parameters()
             )
@@ -200,9 +204,7 @@ class LightningExperiment:
             # 5. Promotion @champion                                       #
             # ========================================================== #
             logger.info("[LightningExperiment.5] Promotion @champion")
-            f1_gold = f1_score(
-                self.gold_labels, y_pred, average="weighted"
-            )
+            f1_gold = f1_score(gold_labels, y_pred, average="weighted")
             self._handle_promotion(f1_gold, run_id)
  
         total_duration = time.time() - start_time
@@ -264,7 +266,7 @@ class LightningExperiment:
             log_every_n_steps=10,
         )
  
-    def _predict_gold(self) -> tuple[np.ndarray, np.ndarray]:
+    def _predict_gold(self, gold_loader) -> tuple[np.ndarray, np.ndarray]:
         """
         Forward sur le gold set → (predictions, probabilities).
  
@@ -277,7 +279,7 @@ class LightningExperiment:
  
         all_logits = []
         with torch.no_grad():
-            for batch in self.gold_loader:
+            for batch in gold_loader:
                 batch = {
                     k: v.to(device, non_blocking=True)
                     for k, v in batch.items()
@@ -362,7 +364,6 @@ class LightningExperiment:
         client = MlflowClient(self.tracking_uri)
  
         # Enregistre le modèle dans le registry
-        model_uri = f"runs:/{run_id}/model"
         mlflow.pytorch.log_model(
             self.model.fusion,  # On log uniquement le module de fusion
             artifact_path="model",

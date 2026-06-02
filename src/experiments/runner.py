@@ -22,6 +22,9 @@ from dotenv import load_dotenv
 load_dotenv()  # charge .env automatiquement
 
 import mlflow
+import mlflow.pyfunc
+from mlflow.tracking import MlflowClient
+
 import yaml
 
 from src.experiments.datamodule.rakuten_datamodule import RakutenLightningDataModule
@@ -31,8 +34,12 @@ from src.experiments.strategies.base_learner_experiment import BaseLearnerExperi
 from src.models.assembled.m2_baseline import M2Baseline
 from src.models.assembled.m2_assembled import M2Assembled
 import os
-
-
+from src.experiments.strategies.lightning_experiment import LightningExperiment
+from src.models.assembled.m3_attention_fusion import M3AttentionFusion
+from src.experiments.datamodule.datasets import MultimodalDataset
+from src.models.base_learners._pyfunc_wrapper import BaseLearnerPyfunc
+from torch.utils.data import DataLoader
+    
 
 # Registre des dimensions d'embeddings par base learner.
 # Utilisé par build_m2_best_experiment pour résoudre embed_dim
@@ -140,6 +147,117 @@ def resolve_active_base_learners(tracking_uri: str) -> dict:
         f"embeddings_{result['image']['name']}_v{n_val}.parquet",
     ]
     return result
+
+def _load_base_learner_for_m3(registry_name: str, tracking_uri: str,) -> tuple:
+    """
+    Charge un base learner depuis MLflow registry via @active.
+ 
+    Returns:
+        (learner, version) : BaseLearner reconstruit + numéro de version
+    """
+
+    client = MlflowClient(tracking_uri)
+    model_uri = f"models:/{registry_name}@active"
+ 
+    pyfunc_model = mlflow.pyfunc.load_model(model_uri)
+    learner = pyfunc_model.unwrap_python_model().learner
+ 
+    mv = client.get_model_version_by_alias(registry_name, "active")
+    version = int(mv.version)
+    print(f"[_load_base_learner_for_m3] {registry_name} @active → v{version}")
+ 
+    return learner, version
+
+def _resolve_m3_base_learners(config: dict, tracking_uri: str) -> dict:
+    """
+    Résout les base learners pour M3, statique ou dynamique.
+ 
+    Statique (section base_learners dans le YAML) :
+        Charge les learners nommés explicitement.
+ 
+    Dynamique (pas de section base_learners) :
+        Résout @active_text / @active_image depuis MLflow,
+        même pattern que build_m2_assembled pour m2_best.
+ 
+    Returns:
+        dict avec les clés :
+            text_encoder, text_version, text_name, text_embed_dim,
+            image_encoder, image_version, image_name, image_embed_dim,
+            max_len
+    """
+ 
+    if "base_learners" in config:
+        # --- Mode statique : noms explicites dans le YAML ---
+        bl_cfg = config["base_learners"]
+ 
+        text_encoder, text_version = _load_base_learner_for_m3(
+            registry_name=bl_cfg["text"]["registry_name"],
+            tracking_uri=tracking_uri,
+        )
+        image_encoder, image_version = _load_base_learner_for_m3(
+            registry_name=bl_cfg["image"]["registry_name"],
+            tracking_uri=tracking_uri,
+        )
+ 
+        return {
+            "text_encoder": text_encoder,
+            "text_version": text_version,
+            "text_name": bl_cfg["text"]["name"],
+            "text_embed_dim": text_encoder.embed_dim,
+            "image_encoder": image_encoder,
+            "image_version": image_version,
+            "image_name": bl_cfg["image"]["name"],
+            "image_embed_dim": image_encoder.embed_dim,
+            "max_len": bl_cfg["text"].get("max_len", 300),
+        }
+ 
+    else:
+        # --- Mode dynamique : @active_text / @active_image ---
+        print("[build_m3] Pas de base_learners dans le YAML → résolution dynamique")
+        client = MlflowClient(tracking_uri)
+ 
+        # Trouver le registered model qui porte @active_text
+        # Convention : les alias @active_text et @active_image sont posés
+        # par BaseLearnerExperiment sur le registered model du learner promu
+        result = {}
+        for modality, alias in [("text", "active_text"), ("image", "active_image")]:
+            # Chercher dans tous les registered models lequel porte cet alias
+            found = False
+            for rm in client.search_registered_models():
+                try:
+                    mv = client.get_model_version_by_alias(rm.name, alias)
+                    # Charger le modèle
+                    model_uri = f"models:/{rm.name}@{alias}"
+                    pyfunc_model = mlflow.pyfunc.load_model(model_uri)
+                    learner = pyfunc_model.unwrap_python_model().learner
+                    version = int(mv.version)
+ 
+                    # Extraire le nom court depuis le registry name
+                    # "rakuten-base-camembert-lora" → "camembert_lora"
+                    short_name = rm.name.replace("rakuten-base-", "").replace("-", "_")
+ 
+                    result[f"{modality}_encoder"] = learner
+                    result[f"{modality}_version"] = version
+                    result[f"{modality}_name"] = short_name
+                    result[f"{modality}_embed_dim"] = learner.embed_dim
+ 
+                    print(
+                        f"[build_m3] @{alias} → {rm.name} v{version} "
+                        f"({learner.embed_dim}d)"
+                    )
+                    found = True
+                    break
+                except Exception:
+                    continue
+ 
+            if not found:
+                raise RuntimeError(
+                    f"Aucun registered model ne porte l'alias @{alias}. "
+                    f"Lancer les base learners et vérifier les promotions."
+                )
+ 
+        result["max_len"] = getattr(result["text_encoder"], "max_len", 300)
+        return result
 
 
 def build_m2_experiment(config: dict) -> tuple[RakutenLightningDataModule, SklearnExperiment]:
@@ -332,7 +450,6 @@ def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataMod
     )
     return dm, experiment
 
-
 def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataModule, BaseLearnerExperiment]:
     """
     M.5 — Assemble DataModule + BaseLearnerExperiment pour un base learner (TextCNN, ResNet50, etc.).
@@ -392,6 +509,89 @@ def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataMod
     print("[DEBUG] BaseLearnerExperiment instantiated")
     return dm, experiment
 
+def build_m3_experiment(config: dict) -> tuple:
+    """
+    Builder pour M3 cross-attention fusion.
+ 
+    Supporte deux modes :
+        - Statique : base_learners explicites dans le YAML
+        - Dynamique : résolution @active_text / @active_image (m3_best)
+    """
+    print("[build_m3] START")
+ 
+    # --- Tracking URI ---
+    mlflow_cfg = config["mlflow"]
+    tracking_uri = (
+        os.getenv("MLFLOW_TRACKING_URI")
+        or mlflow_cfg.get("tracking_uri")
+        or "http://mlflow:5000"
+    )
+    mlflow.set_tracking_uri(tracking_uri)
+ 
+    # --- Résoudre les base learners ---
+    bl = _resolve_m3_base_learners(config, tracking_uri)
+    text_encoder = bl["text_encoder"]
+    image_encoder = bl["image_encoder"]
+ 
+    print(
+        f"[build_m3] Base learners résolus:\n"
+        f"  text  = {bl['text_name']} v{bl['text_version']} "
+        f"({bl['text_embed_dim']}d)\n"
+        f"  image = {bl['image_name']} v{bl['image_version']} "
+        f"({bl['image_embed_dim']}d)"
+    )
+ 
+    # --- Tags traçabilité ---
+    tags = config.setdefault("mlflow", {}).setdefault("tags", {})
+    tags["base_text"] = bl["text_name"]
+    tags["base_text_version"] = str(bl["text_version"])
+    tags["base_image"] = bl["image_name"]
+    tags["base_image_version"] = str(bl["image_version"])
+ 
+    # --- DataModule ---
+    dm_cfg = config["datamodule"]
+    dm = RakutenLightningDataModule(
+        mode=dm_cfg.get("mode", "raw_for_finetune"),
+        batch_size=dm_cfg.get("batch_size", 32),
+        num_workers=dm_cfg.get("num_workers", 4),
+        val_size=dm_cfg.get("val_size", 0.10),
+        random_state=dm_cfg.get("random_state", 42),
+        limit=config.get("limit"),
+        train_batches=dm_cfg.get("train_batches", [1]),
+        exclude_gold=dm_cfg.get("exclude_gold", True),
+    )
+    # Configure le preprocessing M3 (stocke tokenizer + transform,
+    # pas besoin de setup() pour ça)
+    dm.set_m3_preprocessing(
+        tokenizer=text_encoder.tokenizer,
+        max_len=bl["max_len"],
+        image_transform=image_encoder._eval_transform,
+    )
+ 
+    # --- M3 ---
+    model_cfg = config.get("model", {})
+    model = M3AttentionFusion(
+        text_net=text_encoder.net,
+        image_net=image_encoder.net,
+        d_text=bl["text_embed_dim"],
+        d_image=bl["image_embed_dim"],
+        config=model_cfg,
+    )
+    n_params = sum(p.numel() for p in model.fusion.parameters())
+    print(f"[build_m3] M3 instancié — {n_params:,} params entraînables")
+ 
+    # --- LightningExperiment ---
+    experiment = LightningExperiment(
+        model=model,
+        dm=dm,
+        config=config,
+    )
+
+    print("[build_m3] LightningExperiment instancié")
+ 
+    return dm, experiment
+
+
 # Registry des constructeurs par expérience.
 EXPERIMENT_BUILDERS = {
     "m2": build_m2_experiment,                  # legacy M2Stacking (à déprécier après L.5 validé)
@@ -399,6 +599,8 @@ EXPERIMENT_BUILDERS = {
     "m2_benchmark": build_m2_assembled_experiment,
     "m2_frugal_ft": build_m2_assembled_experiment,
     "m2_best": build_m2_assembled_experiment,
+    "m3_attention_fusion": build_m3_experiment,
+    "m3_attention_fusion_best": build_m3_experiment,
     "base_learner_textcnn": build_base_learner_experiment,
     "base_learner_resnet50_partial_ft": build_base_learner_experiment,
     "base_learner_camembert_lora": build_base_learner_experiment,
@@ -443,7 +645,7 @@ def cmd_evaluate(dm: RakutenLightningDataModule, experiment: SklearnExperiment):
     print(f"[Runner] Résultats sur test : {results}")
     return results
 
-def cmd_fit_base_learner(dm: RakutenLightningDataModule, experiment):
+def cmd_fit_base_learner(dm: RakutenLightningDataModule, experiment: BaseLearnerExperiment):
     """M.5 — Action pour fit un base learner (TextCNN, ResNet50PartialFT, etc.)."""
     print("[Runner.M5] fit_base_learner() — orchestration BaseLearnerExperiment")
     print("[Runner.M5] setup()...")
@@ -451,6 +653,15 @@ def cmd_fit_base_learner(dm: RakutenLightningDataModule, experiment):
     print("[Runner.M5] fit() avec MLflow tracking + alias promotion...")
     experiment.fit(dm)
     print("[Runner.M5] fit_base_learner() terminé")
+
+def cmd_fit_lightning(dm: RakutenLightningDataModule, experiment: LightningExperiment):
+    """Action pour fit un modèle Lightning (M3, futurs M4+)."""
+    print("[Runner] setup()...")
+    dm.setup()
+    print("[Runner] fit_lightning()...")
+    experiment.fit()
+    print("[Runner] fit_lightning() terminé")
+
 
 
 def cmd_smoke_tailscale():
@@ -703,7 +914,7 @@ def main():
     )
     parser.add_argument(
         "--action", required=True,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner", "submit_cloud", "smoke_tailscale","fetch_logs"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner","fit_lightning", "submit_cloud", "smoke_tailscale","fetch_logs"],
         help="Action à exécuter",
     )
     parser.add_argument(
@@ -718,7 +929,7 @@ def main():
     parser.add_argument(
         "--cloud-action",
         default=None,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner","fit_lightning"],
         help="(submit_cloud only) Quelle action le pod cloud doit exécuter",
     )
     parser.add_argument(
@@ -803,6 +1014,8 @@ def main():
         cmd_evaluate(dm, experiment)
     elif args.action == "fit_base_learner":
         cmd_fit_base_learner(dm, experiment)
+    elif args.action == "fit_lightning":
+        cmd_fit_lightning(dm, experiment)
     elif args.action == "fetch_logs":
         cmd_fetch_logs(args)
 

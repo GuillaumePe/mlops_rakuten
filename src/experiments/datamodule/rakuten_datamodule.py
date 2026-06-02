@@ -32,7 +32,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 import mlflow
 from src.experiments.datamodule.encoders import TextEncoder, ImageEncoder, slugify_model_name
-from src.experiments.datamodule.datasets import EmbeddingsDataset, RawMultimodalDataset
+from src.experiments.datamodule.datasets import EmbeddingsDataset, MultimodalDataset
 from src.experiments.datamodule.tabular_features import (
     extract_text_tabular,
     extract_image_tabular,
@@ -130,6 +130,29 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self._val_selection_version: int | None = None
 
         self._base_learner_caches: dict[str, pl.DataFrame] | None = None
+    
+    def set_m3_preprocessing(
+        self,
+        tokenizer,
+        max_len: int,
+        image_transform,
+    ) -> None:
+        """
+        Configure le preprocessing multimodal pour M3.
+ 
+        Appelé par le builder dans runner.py APRÈS chargement des base
+        learners, AVANT setup(). Stocke les références — pas besoin de
+        données pour cette étape.
+ 
+        Args:
+            tokenizer: tokenizer HuggingFace du text encoder.
+            max_len: longueur max de tokenisation (300 pour CamemBERT LoRA).
+            image_transform: torchvision transform de l'image encoder.
+        """
+        self._m3_tokenizer = tokenizer
+        self._m3_max_len = max_len
+        self._m3_image_transform = image_transform    
+    
     # --- prepare_data : extraction + cache incrémental --------------------
 
     def prepare_data(self):
@@ -329,6 +352,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         data = {
             "productid": [],
             "imageid": [],
+            "image_path": [],
             "text": [],
             "label": [],
             "batch_id": [],
@@ -347,6 +371,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         
             data["productid"].append(pid)
             data["imageid"].append(doc["imageid"])
+            data["image_path"].append(str(IMAGE_FOLDER_TRAIN / f"image_{doc['imageid']}_product_{pid}.jpg"))
             data["text"].append(clean_description(full_text))
             data["label"].append(self._code_to_idx[labels_map[pid]])
             data["batch_id"].append(doc.get("batch_id"))
@@ -657,29 +682,56 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
 
 
     # --- Interface Lightning (DataLoaders pour M3/M4) ---------------------
-
-    def _make_loader(self, df: pl.DataFrame, shuffle: bool) -> DataLoader:
-        ds = EmbeddingsDataset(df, self._text_cols, self._image_cols)
-        return DataLoader(
-            ds,
-            batch_size=self.batch_size,
-            shuffle=shuffle,
-            num_workers=self.num_workers,
-            pin_memory=torch.cuda.is_available(),
+    def _make_multimodal_dataset(
+        self, df: pl.DataFrame, include_labels: bool = True
+    ) -> "MultimodalDataset":
+        """Construit un MultimodalDataset depuis un DataFrame interne."""
+        return MultimodalDataset(
+            texts=df["text"].to_list(),
+            image_paths=df["image_path"].to_list(),
+            labels=df["label"].to_numpy() if include_labels else None,
+            tokenizer=self._m3_tokenizer,
+            max_len=self._m3_max_len,
+            image_transform=self._m3_image_transform,
         )
+    
+    def _make_loader(self, df: pl.DataFrame, shuffle: bool) -> DataLoader:
+        if self.mode == "raw_for_finetune" and hasattr(self, "_m3_tokenizer"):
+            ds = self._make_multimodal_dataset(df)
+        else:
+            ds = EmbeddingsDataset(df, self._text_cols, self._image_cols)
+            return DataLoader(
+                ds,
+                batch_size=self.batch_size,
+                shuffle=shuffle,
+                num_workers=self.num_workers,
+                pin_memory=torch.cuda.is_available(),
+        )   
 
     def train_dataloader(self) -> DataLoader:
         return self._make_loader(self._df_train, shuffle=True)
 
     def val_dataloader(self) -> DataLoader:
         return self._make_loader(self._df_val, shuffle=False)
+    
 
-    def test_dataloader(self) -> DataLoader:
-        raise NotImplementedError(
-            "Pas de test_dataloader local : utilise get_eval_data('gold') ou "
-            "get_eval_data('shadow', batch_id=N) selon ton besoin d'évaluation."
-        )
-
+    def gold_dataloader(self) -> DataLoader:
+        """
+        DataLoader pour le gold test set.
+ 
+        En mode M3 (set_m3_preprocessing appelé) : MultimodalDataset.
+        Sinon : EmbeddingsDataset.
+        """
+        df_gold = self._df_full.filter(pl.col("is_gold"))
+        if df_gold.height == 0:
+            raise ValueError("Gold set vide.")
+        return self._make_loader(df_gold, shuffle=False)
+ 
+    def get_gold_labels(self) -> np.ndarray:
+        """Labels du gold set, même ordre que gold_dataloader()."""
+        df_gold = self._df_full.filter(pl.col("is_gold"))
+        return df_gold["label"].to_numpy()
+ 
     # --- Interface principale (M2 sklearn + évaluations) ------------------
     def get_sklearn_data(
         self,
