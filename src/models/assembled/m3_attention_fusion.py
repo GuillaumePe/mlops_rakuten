@@ -100,6 +100,10 @@ class M3AttentionFusion(L.LightningModule):
         self.lr = config.get("lr", 5e-4)
         self.weight_decay = config.get("weight_decay", 0.01)
         self.warmup_ratio = config.get("warmup_ratio", 0.1)
+        
+        # Accumulation validation pour F1 epoch-level
+        self._val_preds: list[torch.Tensor] = []
+        self._val_labels: list[torch.Tensor] = []
 
     # ------------------------------------------------------------------ #
     # Forward                                                              #
@@ -115,9 +119,7 @@ class M3AttentionFusion(L.LightningModule):
         (pas de stockage des activations intermédiaires pour le backward).
         """
         with torch.no_grad():
-            text_tokens, text_mask = self.text_net._token_level_features(
-                batch["input_ids"], batch["attention_mask"]
-            )
+            text_tokens, text_mask = self.text_net._token_level_features(batch["input_ids"], batch["attention_mask"])
             image_patches = self.image_net._spatial_feature_map(batch["image"])
         return text_tokens, text_mask, image_patches
 
@@ -152,6 +154,27 @@ class M3AttentionFusion(L.LightningModule):
 
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
         self.log("val/acc", acc, prog_bar=True, sync_dist=True)
+        # Accumulation pour F1 epoch-level (calculé dans on_validation_epoch_end)
+        self._val_preds.append(preds.cpu())
+        self._val_labels.append(batch["label"].cpu())
+
+    def on_validation_epoch_end(self) -> None:
+        """
+        Calcule le F1 weighted sur l'ensemble de la validation epoch.
+ 
+        Même pattern que les BaseLearners (CamembertLoRA, ResNet18FullFT).
+        Loggé dans MLflow via le MLFlowLogger du Trainer → courbe
+        val/f1_weighted visible par epoch dans l'UI.
+        """
+        if not self._val_preds:
+            return
+        all_preds = torch.cat(self._val_preds).numpy()
+        all_labels = torch.cat(self._val_labels).numpy()
+        from sklearn.metrics import f1_score
+        f1_w = f1_score(all_labels, all_preds, average="weighted", zero_division=0)
+        self.log("val/f1_weighted", f1_w, prog_bar=True)
+        self._val_preds.clear()
+        self._val_labels.clear()
 
     # ------------------------------------------------------------------ #
     # Optimizer + scheduler                                                #

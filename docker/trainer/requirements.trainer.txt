@@ -27,6 +27,7 @@ optuna==4.3.0
 lightning==2.6.1
 pytorch-lightning==2.6.1
 lightning-utilities==0.11.9
+optuna-integration[pytorch_lightning]
 matplotlib==3.10.1
 seaborn==0.13.2
 PyYAML==6.0.2

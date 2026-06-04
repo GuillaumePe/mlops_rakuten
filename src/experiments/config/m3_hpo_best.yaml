@@ -1,0 +1,57 @@
+# Configuration M3 — best HPO trial 9
+# Reproduit exactement les HP du meilleur trial Optuna.
+# CamemBERT LoRA + ResNet50 PartialFT (résolution dynamique @active)
+#
+# PRÉREQUIS : fix early stopping dans LightningExperiment
+#   monitor="val/f1_weighted" mode="max" (pas val/loss)
+#   sinon le modèle s'arrête trop tôt (epoch 4 au lieu de 14)
+
+datamodule:
+  mode: raw_for_finetune
+  batch_size: 32
+  num_workers: 4
+  val_size: 0.10
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+
+# Résolution dynamique @active_text / @active_image
+# (camembert_lora + resnet50_partial_ft au moment du HPO)
+
+model:
+  d_model: 384
+  n_heads: 8
+  n_layers: 1
+  dim_ff_factor: 2
+  dropout: 0.341
+  n_classes: 27
+  lr: 5.3e-4
+  weight_decay: 4.86e-3
+  warmup_ratio: 0.1
+
+trainer:
+  max_epochs: 20
+  patience: 5
+  precision: "16-mixed"
+  accelerator: auto
+
+mlflow:
+  experiment_name: M3_attention_fusion
+  run_name: M3_hpo_best_retrain_v2
+  tracking_uri: http://mlflow:5000
+  tags:
+    model_family: M3
+    model_variant: hpo_best_retrain
+    architecture: cross_attention_transformer
+    phase: phase_1
+    source: hpo_trial_9
+    hpo_d_model: "384"
+    hpo_n_layers: "1"
+    hpo_dim_ff_factor: "2"
+    hpo_dropout: "0.341"
+    hpo_lr: "5.3e-4"
+    hpo_weight_decay: "4.86e-3"
+
+promotion:
+  registry_model_name: "rakuten-m3-attention-fusion"
+  threshold: 0.005

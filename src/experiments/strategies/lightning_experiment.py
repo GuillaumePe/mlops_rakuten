@@ -242,18 +242,8 @@ class LightningExperiment:
         )
  
         callbacks = [
-            EarlyStopping(
-                monitor="val/loss",
-                patience=self.patience,
-                mode="min",
-                verbose=True,
-            ),
-            ModelCheckpoint(
-                monitor="val/loss",
-                mode="min",
-                save_top_k=1,
-                filename="best-{epoch}-{val/loss:.4f}",
-            ),
+            EarlyStopping(monitor="val/f1_weighted", patience=3, mode="max", verbose=True,),
+            ModelCheckpoint(monitor="val/f1_weighted", mode="max", save_top_k=1),
         ]
  
         return L.Trainer(

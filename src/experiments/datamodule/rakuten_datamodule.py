@@ -700,7 +700,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             ds = self._make_multimodal_dataset(df)
         else:
             ds = EmbeddingsDataset(df, self._text_cols, self._image_cols)
-            return DataLoader(
+        return DataLoader(
                 ds,
                 batch_size=self.batch_size,
                 shuffle=shuffle,

@@ -230,9 +230,11 @@ services:
       #"/wait-for-it.sh", "postgres", "5432", "--",
       "mlflow", "server",
       "--backend-store-uri=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}",
-      "--default-artifact-root=/mlflow/mlruns",
+      "--default-artifact-root=mlflow-artifacts:/",
+      "--artifacts-destination=/mlflow/mlruns",  
       "--host", "0.0.0.0",
       "--port", "5000",
+      "--serve-artifacts",
       "--allowed-hosts", "localhost:*,127.0.0.1:*,mlflow:*,${IP_Tailscale:-100.126.74.73}:*"]
     ports:
       - "5000:5000"

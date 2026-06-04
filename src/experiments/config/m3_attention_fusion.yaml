@@ -1,0 +1,57 @@
+# Configuration M3 — fusion par attention cross-modale
+# CamemBERT LoRA (texte) + ResNet18 FullFT (image) → TransformerEncoder → MLP
+
+datamodule:
+  mode: raw_for_finetune
+  batch_size: 32
+  num_workers: 4
+  val_size: 0.10
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+
+base_learners:
+  text:
+    name: camembert_lora
+    registry_name: rakuten-base-camembert_lora
+    source: active
+    embed_dim: 768
+    max_len: 300
+  image:
+    name: resnet18_full_ft
+    registry_name: rakuten-base-resnet18_full_ft
+    source: active
+    embed_dim: 512
+
+model:
+  d_model: 512
+  n_heads: 8
+  n_layers: 2
+  dim_ff_factor: 4
+  dropout: 0.3
+  n_classes: 27
+  lr: 5.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+
+trainer:
+  max_epochs: 30
+  patience: 3
+  precision: "16-mixed"
+  accelerator: auto
+
+mlflow:
+  experiment_name: M3_attention_fusion
+  run_name: M3_camembert_lora_resnet18ft_v1
+  tracking_uri: http://mlflow:5000
+  tags:
+    model_family: M3
+    model_variant: attention_fusion
+    base_text: camembert_lora
+    base_image: resnet18_full_ft
+    architecture: cross_attention_transformer
+    phase: phase_1
+
+promotion:
+  registry_model_name: "rakuten-m3-attention-fusion"
+  threshold: 0.005

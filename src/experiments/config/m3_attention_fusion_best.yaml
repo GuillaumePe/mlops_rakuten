@@ -1,0 +1,48 @@
+# Configuration M3 best — meilleurs base learners par modalité
+# Résolution dynamique : le builder lit @active_text et @active_image
+# depuis MLflow pour déterminer le couple (text_encoder, image_encoder).
+#
+# Pas de section base_learners: — elle est résolue au runtime.
+
+datamodule:
+  mode: raw_for_finetune
+  batch_size: 32
+  num_workers: 4
+  val_size: 0.10
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+
+# base_learners: DYNAMIC — résolu depuis @active_text / @active_image
+
+model:
+  d_model: 512
+  n_heads: 8
+  n_layers: 2
+  dim_ff_factor: 4
+  dropout: 0.3
+  n_classes: 27
+  lr: 5.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+
+trainer:
+  max_epochs: 30
+  patience: 3
+  precision: "16-mixed"
+  accelerator: auto
+
+mlflow:
+  experiment_name: M3_attention_fusion
+  run_name: M3_best_auto_v1
+  tracking_uri: http://mlflow:5000
+  tags:
+    model_family: M3
+    model_variant: best_base_learners
+    architecture: cross_attention_transformer
+    phase: phase_1
+    resolution: dynamic_active_aliases
+
+promotion:
+  registry_model_name: "rakuten-m3-attention-fusion"
+  threshold: 0.005

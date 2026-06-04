@@ -1,0 +1,71 @@
+# Configuration HPO pour M3 — Optuna + Lightning
+#
+# Usage :
+#   python -m src.experiments.runner --experiment m3_hpo --action hpo_lightning
+#
+# Les base learners sont résolus dynamiquement (@active_text / @active_image).
+# Le search space est lu par cmd_hpo_lightning, pas par un builder.
+
+datamodule:
+  mode: raw_for_finetune
+  batch_size: 32
+  num_workers: 4
+  val_size: 0.10
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+
+# Valeurs fixes (pas dans le search space)
+model:
+  n_classes: 27
+  n_heads: 8
+  warmup_ratio: 0.1
+
+# Search space Optuna
+hpo:
+  n_trials: 10
+  study_name: m3_hpo
+  search_space:
+    d_model:
+      type: categorical
+      choices: [256, 384, 512]
+    n_layers:
+      type: int
+      low: 1
+      high: 3
+    dim_ff_factor:
+      type: categorical
+      choices: [2, 4]
+    dropout:
+      type: float
+      low: 0.2
+      high: 0.6
+    lr:
+      type: float
+      low: 1.0e-5
+      high: 1.0e-3
+      log: true
+    weight_decay:
+      type: float
+      low: 1.0e-3
+      high: 0.1
+      log: true
+
+trainer:
+  max_epochs: 15
+  patience: 3
+  precision: "16-mixed"
+  accelerator: auto
+
+mlflow:
+  experiment_name: M3_attention_fusion
+  run_name: M3_hpo_best
+  tracking_uri: http://mlflow:5000
+  tags:
+    model_family: M3
+    model_variant: hpo_optuna
+    phase: phase_1
+
+promotion:
+  registry_model_name: "rakuten-m3-attention-fusion"
+  threshold: 0.005

@@ -39,7 +39,8 @@ from src.models.assembled.m3_attention_fusion import M3AttentionFusion
 from src.experiments.datamodule.datasets import MultimodalDataset
 from src.models.base_learners._pyfunc_wrapper import BaseLearnerPyfunc
 from torch.utils.data import DataLoader
-    
+
+from src.experiments.strategies.hpo_lightning_experiment import HPOLightningExperiment
 
 # Registre des dimensions d'embeddings par base learner.
 # Utilisé par build_m2_best_experiment pour résoudre embed_dim
@@ -527,7 +528,7 @@ def build_m3_experiment(config: dict) -> tuple:
         or "http://mlflow:5000"
     )
     mlflow.set_tracking_uri(tracking_uri)
- 
+    #config["mlflow"]["tracking_uri"] = tracking_uri 
     # --- Résoudre les base learners ---
     bl = _resolve_m3_base_learners(config, tracking_uri)
     text_encoder = bl["text_encoder"]
@@ -591,6 +592,75 @@ def build_m3_experiment(config: dict) -> tuple:
  
     return dm, experiment
 
+def build_m3_hpo_experiment(config: dict) -> tuple:
+    """
+    Builder pour HPO M3.
+ 
+    Charge les base learners, configure le DataModule, et crée un
+    HPOLightningExperiment avec une model_factory qui capture les
+    base learners dans une closure.
+    """
+    print("[build_m3_hpo] START")
+ 
+    tracking_uri = config["mlflow"]["tracking_uri"]
+    mlflow.set_tracking_uri(tracking_uri)
+ 
+    # Charger base learners UNE FOIS
+    bl = _resolve_m3_base_learners(config, tracking_uri)
+    text_encoder = bl["text_encoder"]
+    image_encoder = bl["image_encoder"]
+ 
+    print(
+        f"[build_m3_hpo] Base learners :\n"
+        f"  text  = {bl['text_name']} v{bl['text_version']} ({bl['text_embed_dim']}d)\n"
+        f"  image = {bl['image_name']} v{bl['image_version']} ({bl['image_embed_dim']}d)"
+    )
+ 
+    # Tags traçabilité
+    tags = config.setdefault("mlflow", {}).setdefault("tags", {})
+    tags["base_text"] = bl["text_name"]
+    tags["base_text_version"] = str(bl["text_version"])
+    tags["base_image"] = bl["image_name"]
+    tags["base_image_version"] = str(bl["image_version"])
+ 
+    # DataModule (configuré, PAS setup)
+    dm_cfg = config["datamodule"]
+    dm = RakutenLightningDataModule(
+        mode=dm_cfg.get("mode", "raw_for_finetune"),
+        batch_size=dm_cfg.get("batch_size", 32),
+        num_workers=dm_cfg.get("num_workers", 4),
+        val_size=dm_cfg.get("val_size", 0.10),
+        random_state=dm_cfg.get("random_state", 42),
+        limit=config.get("limit"),
+        train_batches=dm_cfg.get("train_batches", [1]),
+        exclude_gold=dm_cfg.get("exclude_gold", True),
+    )
+    dm.set_m3_preprocessing(
+        tokenizer=text_encoder.tokenizer,
+        max_len=bl["max_len"],
+        image_transform=image_encoder._eval_transform,
+    )
+ 
+    # model_factory : closure qui capture les base learners
+    # Appelée par HPOLightningExperiment à chaque trial avec les HP du trial
+    def model_factory(trial_model_cfg: dict) -> M3AttentionFusion:
+        return M3AttentionFusion(
+            text_net=text_encoder.net,
+            image_net=image_encoder.net,
+            d_text=bl["text_embed_dim"],
+            d_image=bl["image_embed_dim"],
+            config=trial_model_cfg,
+        )
+ 
+    experiment = HPOLightningExperiment(
+        model_factory=model_factory,
+        dm=dm,
+        config=config,
+    )
+ 
+    print("[build_m3_hpo] HPOLightningExperiment instancié")
+    return dm, experiment
+
 
 # Registry des constructeurs par expérience.
 EXPERIMENT_BUILDERS = {
@@ -601,12 +671,12 @@ EXPERIMENT_BUILDERS = {
     "m2_best": build_m2_assembled_experiment,
     "m3_attention_fusion": build_m3_experiment,
     "m3_attention_fusion_best": build_m3_experiment,
+    "m3_hpo": build_m3_hpo_experiment,
+    "m3_hpo_best": build_m3_experiment,
     "base_learner_textcnn": build_base_learner_experiment,
     "base_learner_resnet50_partial_ft": build_base_learner_experiment,
     "base_learner_camembert_lora": build_base_learner_experiment,
     "base_learner_resnet18_full_ft": build_base_learner_experiment,
-    
-
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -662,6 +732,13 @@ def cmd_fit_lightning(dm: RakutenLightningDataModule, experiment: LightningExper
     experiment.fit()
     print("[Runner] fit_lightning() terminé")
 
+def cmd_hpo_lightning(dm: RakutenLightningDataModule, experiment: HPOLightningExperiment):
+    """HPO Optuna pour M3 — même pattern que les autres cmd."""
+    print("[Runner] setup()...")
+    dm.setup()
+    print("[Runner] hpo_lightning()...")
+    experiment.fit()
+    print("[Runner] hpo_lightning() terminé")
 
 
 def cmd_smoke_tailscale():
@@ -914,7 +991,7 @@ def main():
     )
     parser.add_argument(
         "--action", required=True,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner","fit_lightning", "submit_cloud", "smoke_tailscale","fetch_logs"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner","fit_lightning", "submit_cloud", "smoke_tailscale","fetch_logs","hpo_lightning"],
         help="Action à exécuter",
     )
     parser.add_argument(
@@ -929,7 +1006,7 @@ def main():
     parser.add_argument(
         "--cloud-action",
         default=None,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner","fit_lightning"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner","fit_lightning","hpo_lightning"],
         help="(submit_cloud only) Quelle action le pod cloud doit exécuter",
     )
     parser.add_argument(
@@ -973,10 +1050,14 @@ def main():
     # MLflow tracking URI : CLI > config > défaut
     tracking_uri = (
         args.mlflow_tracking_uri
+        or os.getenv("MLFLOW_TRACKING_URI")
         or config.get("mlflow", {}).get("tracking_uri")
         or "http://mlflow:5000"
     )
 
+    # Injecter dans la config pour que tous les builders/experiments l'utilisent
+    config.setdefault("mlflow", {})["tracking_uri"] = tracking_uri
+    
     # Dispatch action
     if args.action == "submit_cloud":
         # Pas d'init MLflow local : le tracking se fera côté pod
@@ -1016,6 +1097,9 @@ def main():
         cmd_fit_base_learner(dm, experiment)
     elif args.action == "fit_lightning":
         cmd_fit_lightning(dm, experiment)
+    elif args.action == "hpo_lightning":
+        cmd_hpo_lightning(dm, experiment)
+
     elif args.action == "fetch_logs":
         cmd_fetch_logs(args)
 
