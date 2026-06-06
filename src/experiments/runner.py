@@ -52,6 +52,7 @@ LEARNER_EMBED_DIM = {
     "resnet50_partial_ft": 2048,
     "resnet18_full_ft": 512,
     "resnet18_frozen": 512,
+    "siglip2": 768,    
 }
 
 
@@ -677,6 +678,7 @@ EXPERIMENT_BUILDERS = {
     "base_learner_resnet50_partial_ft": build_base_learner_experiment,
     "base_learner_camembert_lora": build_base_learner_experiment,
     "base_learner_resnet18_full_ft": build_base_learner_experiment,
+    "base_learner_siglip2": build_base_learner_experiment   
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -789,6 +791,36 @@ def cmd_fetch_logs(args):
         # (le job_id RunPod ≠ pod_id mais souvent corrélés, donc on liste et l'user choisit)
         print(f"\n[fetch_logs] Pour télécharger un log, lance :")
         print(f"    python scripts/r2_logs.py download <key_au_dessus> /tmp/<key>")
+
+def cmd_complete_cache(dm, experiment):
+    """
+    Voie B — termine le 7c interrompu : réécrit le cache parquet du base learner
+    @active SANS re-train ni toucher aux alias. Réutilise _write_cache_parquet.
+    Learner frozen → embeddings = backbone gelé → instance fraîche = embeddings @active.
+    """
+    import torch
+    from mlflow.tracking import MlflowClient
+
+    print("[complete_cache] setup()...")
+    dm.setup()
+
+    learner = experiment._build_learner()        # méthode contenant learner_builders
+    learner.net = learner._build_net()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    learner.net.to(device)                        # force GPU (pas besoin du fix _forward_in_batches)
+    learner.net.eval()
+    experiment._learner = learner
+
+    name = f"rakuten-base-{experiment.learner_name}"
+    client = MlflowClient()
+    try:
+        version = int(client.get_model_version_by_alias(name, "active_image").version)
+    except Exception:
+        version = int(client.get_model_version_by_alias(name, "active").version)
+    print(f"[complete_cache] {name} @active -> v{version} | extraction sur {device}")
+
+    experiment._write_cache_parquet(dm, source_model_version=version)
+    print("[complete_cache] ✓ Cache réécrit + push R2")
 
 def cmd_submit_cloud(args, config: dict):
     """
@@ -991,7 +1023,7 @@ def main():
     )
     parser.add_argument(
         "--action", required=True,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner","fit_lightning", "submit_cloud", "smoke_tailscale","fetch_logs","hpo_lightning"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner","fit_lightning", "submit_cloud", "smoke_tailscale","fetch_logs","hpo_lightning","complete_cache"],
         help="Action à exécuter",
     )
     parser.add_argument(
@@ -1006,7 +1038,7 @@ def main():
     parser.add_argument(
         "--cloud-action",
         default=None,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner","fit_lightning","hpo_lightning"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner","fit_lightning","hpo_lightning","complete_cache"],
         help="(submit_cloud only) Quelle action le pod cloud doit exécuter",
     )
     parser.add_argument(
@@ -1095,6 +1127,8 @@ def main():
         cmd_evaluate(dm, experiment)
     elif args.action == "fit_base_learner":
         cmd_fit_base_learner(dm, experiment)
+    elif args.action == "complete_cache":
+        cmd_complete_cache(dm, experiment)
     elif args.action == "fit_lightning":
         cmd_fit_lightning(dm, experiment)
     elif args.action == "hpo_lightning":

@@ -62,6 +62,7 @@ from sklearn.metrics import accuracy_score, f1_score, log_loss
 from lightning.pytorch.loggers import MLFlowLogger
 from src.models.base_learners._pyfunc_wrapper import BaseLearnerPyfunc
 from src.experiments.strategies._metrics import expected_calibration_error
+from src.models.base_learners.image.siglip2 import Siglip2
 if TYPE_CHECKING:
     from src.experiments.datamodule.rakuten_datamodule import RakutenLightningDataModule
     from src.models.base_learners._base import BaseLearner
@@ -201,6 +202,28 @@ class BaseLearnerExperiment:
                 precision=cfg.get("precision", "bf16-mixed"),
                 augmentation_level=cfg.get("augmentation_level", "medium"),
             ),
+            "siglip2": lambda cfg: Siglip2(
+                image_folder=str(self.data_folder / "images" / "image_train"),
+                model_name=cfg.get("model_name", "google/siglip2-base-patch16-224"),
+                embed_dim=cfg.get("embed_dim", 768),
+                n_classes=27,
+                lora_enabled=cfg.get("lora_enabled", False),
+                lora_rank=cfg.get("lora_rank", 16),
+                lora_alpha=cfg.get("lora_alpha", 32),
+                lora_dropout=cfg.get("lora_dropout", 0.05),
+                lora_last_n_layers=cfg.get("lora_last_n_layers", 2),
+                batch_size=cfg.get("batch_size", 64),
+                max_epochs=cfg.get("max_epochs", 15),
+                patience=cfg.get("patience", 3),
+                lr_head=float(cfg.get("lr_head", 1e-3)),
+                lr_lora=float(cfg.get("lr_lora", 1e-4)),
+                weight_decay=float(cfg.get("weight_decay", 1e-2)),
+                warmup_ratio=float(cfg.get("warmup_ratio", 0.1)),
+                head_dropout=float(cfg.get("head_dropout", 0.0)),
+                num_workers=cfg.get("num_workers", 4),
+                random_state=cfg.get("random_state", 42),
+                precision=cfg.get("precision", "bf16-mixed"),
+                ),
         }
 
         if self.learner_name not in learner_builders:

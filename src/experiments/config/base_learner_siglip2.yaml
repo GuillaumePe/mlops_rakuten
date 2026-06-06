@@ -1,0 +1,46 @@
+datamodule:
+  mode: "raw_for_finetune"
+  batch_size: 32
+  num_workers: 4
+  val_size: 0.2
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+  data_folder: "data/raw_data"
+
+learner:
+  name: "siglip2"
+  config:
+    model_name: "google/siglip2-base-patch16-224"  # ViT-B, hidden 768
+    embed_dim: 768                # 768 base / 1024 L / 1152 So400m — DOIT matcher le checkpoint
+    n_classes: 27
+
+    # --- B1 : linear probe sur encodeur 100% figé (DÉFAUT, à mesurer d'abord) ---
+    lora_enabled: false           # passer true pour B2 (gated sur constat de plafond + confusion fine-grained)
+    lora_rank: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    lora_last_n_layers: 2         # nb de derniers blocs ViT adaptés en mode LoRA
+
+    batch_size: 64                # marge VRAM sur RTX PRO 4500/5090 (forward ViT-B figé)
+    max_epochs: 15
+    patience: 3                   # early stopping sur val_f1_weighted
+    lr_head: 1.0e-3               # tête random -> LR élevé
+    lr_lora: 1.0e-4               # adapters LoRA (ignoré si lora_enabled=false)
+    weight_decay: 1e-2
+    warmup_ratio: 0.1
+    head_dropout: 0.0             # 0 = probe linéaire pur ; >0 pour régulariser la tête
+    num_workers: 4
+    random_state: 42
+    precision: "bf16-mixed"
+
+mlflow:
+  tracking_uri: "http://mlflow:5000"
+  experiment_name: "base_learners_phase1"
+  run_name: "siglip2_linear_probe_m4"   # B1 ; pour B2 : "siglip2_lora_m4"
+  tags:
+    phase: "1"
+    model_family: "M4"
+    learner: "siglip2"
+    modality: "image"
+    mode: "linear_probe"                # "lora" en B2
