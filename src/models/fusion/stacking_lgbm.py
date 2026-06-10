@@ -38,7 +38,8 @@ from sklearn.metrics import f1_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-
+from scipy.optimize import minimize_scalar
+from scipy.special import softmax as scipy_softmax
 
 class StackingLGBM:
     """
@@ -124,7 +125,9 @@ class StackingLGBM:
         self.oof_p_image_: Optional[np.ndarray] = None
         self.y_train_: Optional[np.ndarray] = None
         self.cv_scores_: Optional[list[float]] = None
-
+        # Temperature scaling (fitté sur les OOF, appliqué avant _build_meta_X)
+        self.T_text_: Optional[float] = None
+        self.T_image_: Optional[float] = None
     # ------------------------------------------------------------------ #
     # Helpers                                                             #
     # ------------------------------------------------------------------ #
@@ -134,11 +137,132 @@ class StackingLGBM:
         return X.select(cols).to_numpy().astype(np.float32)
 
     def _build_meta_X(
-        self, oof_p_text: np.ndarray, oof_p_image: np.ndarray, X_tab: np.ndarray
+        self, oof_p_text: np.ndarray, oof_p_image: np.ndarray, X_tab: np.ndarray, derived: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Concatène les 3 familles de features en l'ordre canonique."""
-        return np.hstack([oof_p_text, oof_p_image, X_tab])
+        """
+        Concatène les familles de features en l'ordre canonique.
+        Si derived est fourni (post-A.2), l'ordre est :
+            [p_text_cal (27), p_image_cal (27), tab (12), derived (8)] = 74 dims
+        Sinon (backward compat) :
+            [p_text (27), p_image (27), tab (12)] = 66 dims
+        """
+        parts = [oof_p_text, oof_p_image, X_tab]
+        if derived is not None:
+            parts.append(derived)
+        return np.hstack(parts)
+    # ------------------------------------------------------------------ #
+    # Temperature scaling                                                #
+    # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _fit_temperature(p_oof: np.ndarray, y: np.ndarray) -> float:
+        """
+        Fitte un scalaire T par minimisation de la NLL sur les OOF.
+
+        p_oof : (n, n_classes) — probas brutes OOF
+        y     : (n,)           — labels entiers
+
+        Retourne T > 0. Si T < 1, le modèle était sous-confiant (rare pour
+        LogReg). Garde-fou : on valide que NLL_calibrée < NLL_brute ; sinon T=1.
+        """
+        eps = 1e-7
+        log_p = np.log(np.clip(p_oof, eps, 1.0))  # (n, K)
+
+        def nll(T: float) -> float:
+            scaled = scipy_softmax(log_p / T, axis=1)  # (n, K)
+            return -np.log(scaled[np.arange(len(y)), y] + eps).mean()
+
+        nll_baseline = nll(1.0)
+        result = minimize_scalar(nll, bounds=(0.1, 10.0), method="bounded")
+        T_opt = float(result.x)
+
+        # Garde-fou : T ne doit pas aggraver la NLL
+        if nll(T_opt) >= nll_baseline:
+            print(f"[StackingLGBM] Temperature scaling : NLL ne s'améliore pas "
+                  f"(T={T_opt:.3f}), fallback T=1.0")
+            return 1.0
+
+        print(f"[StackingLGBM] Temperature scaling : T={T_opt:.4f} "
+              f"(NLL {nll_baseline:.4f} → {nll(T_opt):.4f})")
+        return T_opt
+
+    @staticmethod
+    def _apply_temperature(p: np.ndarray, T: float) -> np.ndarray:
+        """
+        Applique le temperature scaling : p' = softmax(log(p) / T).
+
+        Travaille depuis les log-probas pour éviter les -inf sur p≈0.
+        T=1.0 est un no-op exact.
+        """
+        if T == 1.0:
+            return p
+        eps = 1e-7
+        log_p = np.log(np.clip(p, eps, 1.0))
+        return scipy_softmax(log_p / T, axis=1).astype(np.float32)
+
+    # ------------------------------------------------------------------ #
+    # Features dérivées                                                  #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _derived_features(
+        p_text: np.ndarray, p_image: np.ndarray
+    ) -> np.ndarray:
+        """
+        Calcule 8 features dérivées à partir des probas calibrées.
+
+        Toutes calculées APRÈS temperature scaling pour refléter
+        l'incertitude réelle des bases.
+
+        Features (par sample) :
+            0 - agreement    : 1 si argmax(text)==argmax(image)
+            1 - margin_text  : top1 - top2 de p_text
+            2 - margin_image : top1 - top2 de p_image
+            3 - max_text     : max(p_text)  — confiance brute texte
+            4 - max_image    : max(p_image) — confiance brute image
+            5 - entropy_text : -sum(p log p) / log(K) normalisée en [0,1]
+            6 - entropy_image: idem
+            7 - kl_text_img  : KL(p_text || p_image) — divergence inter-bases
+
+        Returns:
+            (n, 8) float32
+        """
+        eps = 1e-7
+        n, K = p_text.shape
+        log_K = np.log(K)
+
+        # argmax accord
+        agreement = (np.argmax(p_text, axis=1) == np.argmax(p_image, axis=1)
+                     ).astype(np.float32)
+
+        # Tri descend pour top1/top2
+        sorted_text = np.sort(p_text, axis=1)[:, ::-1]
+        sorted_image = np.sort(p_image, axis=1)[:, ::-1]
+        margin_text = (sorted_text[:, 0] - sorted_text[:, 1]).astype(np.float32)
+        margin_image = (sorted_image[:, 0] - sorted_image[:, 1]).astype(np.float32)
+
+        max_text = sorted_text[:, 0].astype(np.float32)
+        max_image = sorted_image[:, 0].astype(np.float32)
+
+        # Entropie normalisée (0 = certitude, 1 = uniforme)
+        entropy_text = (-np.sum(p_text * np.log(p_text + eps), axis=1) / log_K
+                        ).astype(np.float32)
+        entropy_image = (-np.sum(p_image * np.log(p_image + eps), axis=1) / log_K
+                         ).astype(np.float32)
+
+        # KL(p_text || p_image) — asymétrique, mesure comment p_image
+        # s'écarte de p_text. Non symétrique intentionnellement : le texte
+        # est le signal dominant, on mesure l'écart de l'image par rapport à lui.
+        kl = np.sum(
+            p_text * np.log((p_text + eps) / (p_image + eps)), axis=1
+        ).astype(np.float32)
+
+        return np.column_stack([
+            agreement, margin_text, margin_image,
+            max_text, max_image,
+            entropy_text, entropy_image,
+            kl,
+        ])
     # ------------------------------------------------------------------ #
     # OOF predictions                                                    #
     # ------------------------------------------------------------------ #
@@ -288,9 +412,21 @@ class StackingLGBM:
         self.oof_p_text_, self.oof_p_image_ = self._compute_oof(X_train, y_train, skf)
         self.y_train_ = y_train.copy()
 
+        # 1.bis — Temperature scaling sur les OOF
+        print("[StackingLGBM] Fitting temperature scaling sur les OOF...")
+        self.T_text_ = self._fit_temperature(self.oof_p_text_, y_train)
+        self.T_image_ = self._fit_temperature(self.oof_p_image_, y_train)
+        mlflow.log_param("temperature/T_text", round(self.T_text_, 4))
+        mlflow.log_param("temperature/T_image", round(self.T_image_, 4))
+
+        # 1.ter — Appliquer T + features dérivées
+        oof_p_text_cal = self._apply_temperature(self.oof_p_text_, self.T_text_)
+        oof_p_image_cal = self._apply_temperature(self.oof_p_image_, self.T_image_)
+        derived = self._derived_features(oof_p_text_cal, oof_p_image_cal)
+
         # 2. Construire meta_X
         X_tab = self._to_numpy(X_train, self.tabular_cols)
-        meta_X = self._build_meta_X(self.oof_p_text_, self.oof_p_image_, X_tab)
+        meta_X = self._build_meta_X(oof_p_text_cal, oof_p_image_cal, X_tab, derived)
         print(f"[StackingLGBM] meta_X shape : {meta_X.shape}")
 
         # 3. HPO Optuna sur le meta LGBM
@@ -389,7 +525,10 @@ class StackingLGBM:
 
         p_text = self.f_text_.predict_proba(X_text)
         p_image = self.f_image_.predict_proba(X_image)
-        meta_X = self._build_meta_X(p_text, p_image, X_tab)
+        p_text_cal = self._apply_temperature(p_text, self.T_text_ or 1.0)
+        p_image_cal = self._apply_temperature(p_image, self.T_image_ or 1.0)
+        derived = self._derived_features(p_text_cal, p_image_cal)
+        meta_X = self._build_meta_X(p_text_cal, p_image_cal, X_tab, derived)
 
         return self.meta_.predict(meta_X)
 
@@ -404,7 +543,10 @@ class StackingLGBM:
 
         p_text = self.f_text_.predict_proba(X_text)
         p_image = self.f_image_.predict_proba(X_image)
-        meta_X = self._build_meta_X(p_text, p_image, X_tab)
+        p_text_cal = self._apply_temperature(p_text, self.T_text_ or 1.0)
+        p_image_cal = self._apply_temperature(p_image, self.T_image_ or 1.0)
+        derived = self._derived_features(p_text_cal, p_image_cal)
+        meta_X = self._build_meta_X(p_text_cal, p_image_cal, X_tab, derived)
 
         return self.meta_.predict_proba(meta_X)
 

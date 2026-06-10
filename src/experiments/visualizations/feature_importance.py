@@ -77,6 +77,8 @@ def default_group_of_m2(feature_name: str) -> str:
         or name.startswith("proba_image_")
     ):
         return "image"
+    if feature_name.startswith("derived__"):
+        return "derived"
     return "tabular"
 
 
