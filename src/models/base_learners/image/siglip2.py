@@ -197,6 +197,23 @@ class _Siglip2Lightning(L.LightningModule):
             pooled = out.last_hidden_state.mean(dim=1)
         return pooled
 
+    def _spatial_feature_map(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """
+        (B, n_patches, embed_dim) -- patch tokens du ViT (last_hidden_state).
+
+        SigLIP n'a PAS de token CLS (pooling par MAP head) : last_hidden_state
+        contient directement les n_patches tokens spatiaux. Pour
+        siglip2-base-patch16-224 : (224/16)^2 = 196 patches, hidden 768.
+
+        PAS de no_grad interne : le caller decide du flux de gradient.
+        - M3 (frozen) : appelle sous no_grad via _forward_encoders.
+        - M3.2 (co-adaptation DoRA) : gradient sur les dernieres couches.
+        Miroir exact de ResNet18FullFT._spatial_feature_map cote interface M3.
+        """
+        out = self.backbone(pixel_values=pixel_values)
+        return out.last_hidden_state
+
+
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Forward complet -> logits (B, n_classes)."""
         return self.head(self._features(pixel_values))
@@ -615,3 +632,55 @@ class Siglip2(BaseLearner):
         instance.net.head.load_state_dict(saved["head_state"])
         instance.net.eval()
         return instance
+
+    # ------------------------------------------------------------------ #
+    # M3 beta -- interface fusion par attention (patch tokens + transform) #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def _eval_transform(self):
+        """
+        Callable PIL.Image -> tensor (C, H, W) via l'AutoImageProcessor du
+        checkpoint. Miroir de ResNet18FullFT._eval_transform pour l'interface
+        M3 : dm.set_m3_preprocessing(image_transform=image_encoder._eval_transform).
+
+        Applique la normalisation EXACTE de SigLIP (mean/std [0.5]*3), PAS
+        celle d'ImageNet. Le MultimodalDataset l'appelle par-image puis stacke.
+        """
+        processor = self._ensure_processor()
+
+        def _transform(pil_img):
+            return processor(images=pil_img, return_tensors="pt")["pixel_values"][0]
+
+        return _transform
+
+    def extract_feature_map(self, X: pl.DataFrame) -> np.ndarray:
+        """
+        (n, n_patches, embed_dim) -- patch tokens (last_hidden_state du ViT).
+
+        Miroir de ResNet18FullFT.extract_feature_map. Non utilise par M3.2
+        (qui appelle net._spatial_feature_map directement, avec gradient), mais
+        utile pour smoke-test / usage standalone. Force le GPU + autocast bf16
+        comme _forward_in_batches.
+        """
+        if self.net is None:
+            raise RuntimeError(
+                "Siglip2.fit() ou from_pretrained() doit etre appele avant "
+                "extract_feature_map."
+            )
+        image_paths = self._build_image_paths(X)
+        loader = self._make_loader(image_paths, labels=None, shuffle=False)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.net.to(device)
+        self.net.eval()
+        use_amp = device.type == "cuda"
+
+        outputs = []
+        with torch.no_grad():
+            for x, _ in loader:
+                x = x.to(device, non_blocking=True)
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                    fmap = self.net._spatial_feature_map(x)   # (B, n_patches, embed_dim)
+                outputs.append(fmap.float().cpu().numpy())
+
+        return np.concatenate(outputs, axis=0).astype(np.float32)

@@ -732,6 +732,11 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         df_gold = self._df_full.filter(pl.col("is_gold"))
         return df_gold["label"].to_numpy()
  
+    def get_gold_productids(self) -> np.ndarray:
+        """productid du gold, même ordre que gold_dataloader() et get_gold_labels()."""
+        df_gold = self._df_full.filter(pl.col("is_gold"))
+        return df_gold["productid"].to_numpy()
+    
     # --- Interface principale (M2 sklearn + évaluations) ------------------
     def get_sklearn_data(
         self,

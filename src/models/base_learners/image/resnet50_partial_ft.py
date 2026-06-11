@@ -535,21 +535,20 @@ class ResNet50PartialFT(BaseLearner):
             image_paths, labels=None, transform=self._eval_transform, shuffle=False,
         )
 
+        # FIX : Lightning peut avoir remis le modèle sur CPU après fit().
+        # On force explicitement le device au lieu de le déduire des params.
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.net.to(device)
         self.net.eval()
-        device = next(self.net.parameters()).device
+        use_amp = device.type == "cuda"
 
         outputs = []
         with torch.no_grad():
-            for batch in loader:
-                x, _ = batch
+            for x, _ in loader:
                 x = x.to(device, non_blocking=True)
-                if return_features:
-                    feat = self.net._features(x)            # (B, 2048)
-                    outputs.append(feat.cpu().numpy())
-                else:
-                    logits = self.net(x)                    # (B, 27)
-                    probas = F.softmax(logits, dim=1)
-                    outputs.append(probas.cpu().numpy())
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                    out = self.net._features(x) if return_features else F.softmax(self.net(x), dim=1)
+                outputs.append(out.float().cpu().numpy())
 
         return np.concatenate(outputs, axis=0).astype(np.float32)
 

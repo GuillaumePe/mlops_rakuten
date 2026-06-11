@@ -139,6 +139,16 @@ class SklearnExperiment:
                 [f"p_text_class_{c}" for c in range(self.model.n_classes)]
                 + [f"p_image_class_{c}" for c in range(self.model.n_classes)]
                 + [f"tab__{name}" for name in self.model.tabular_cols]
+                + [
+                    "derived__agreement",
+                    "derived__margin_text",
+                    "derived__margin_image",
+                    "derived__max_text",
+                    "derived__max_image",
+                    "derived__entropy_text",
+                    "derived__entropy_image",
+                    "derived__kl_text_img",
+                ]
             )
             log_feature_importance_to_mlflow(
                 model=self.model.meta_,

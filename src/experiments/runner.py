@@ -39,7 +39,7 @@ from src.models.assembled.m3_attention_fusion import M3AttentionFusion
 from src.experiments.datamodule.datasets import MultimodalDataset
 from src.models.base_learners._pyfunc_wrapper import BaseLearnerPyfunc
 from torch.utils.data import DataLoader
-
+from src.models.assembled.m3_2_coadaptation import M32CoAdaptationFusion
 from src.experiments.strategies.hpo_lightning_experiment import HPOLightningExperiment
 
 # Registre des dimensions d'embeddings par base learner.
@@ -66,6 +66,32 @@ def load_config(experiment_name: str) -> dict:
         raise FileNotFoundError(f"Config introuvable : {config_path}")
     with open(config_path) as f:
         return yaml.safe_load(f)
+    
+def apply_overrides(config: dict, overrides: list[str]) -> dict:
+    """
+    Applique des overrides 'a.b.c=value' au dict config (in-place + retour).
+
+    Typage : yaml.safe_load ('8'->int, 'true'->bool, '[1,2]'->list, ...), AVEC
+    rattrapage float pour la notation scientifique sans point que yaml laisse en
+    str ('2e-4', '1e5' -> float). Crée les clés intermédiaires manquantes.
+    """
+    for item in overrides:
+        if "=" not in item:
+            raise ValueError(f"Override invalide (attendu KEY=VALUE) : {item!r}")
+        key_path, raw_value = item.split("=", 1)
+        value = yaml.safe_load(raw_value)
+        if isinstance(value, str):          # rattrape '2e-4' -> 0.0002
+            try:
+                value = float(value)
+            except ValueError:
+                pass                        # vraie chaîne (ex: 'attention')
+        keys = key_path.split(".")
+        node = config
+        for k in keys[:-1]:
+            node = node.setdefault(k, {})
+        node[keys[-1]] = value
+        print(f"[Runner] override : {key_path} = {value!r} ({type(value).__name__})")
+    return config
 
 def get_local_tailscale_ip() -> str:
     """
@@ -662,6 +688,76 @@ def build_m3_hpo_experiment(config: dict) -> tuple:
     print("[build_m3_hpo] HPOLightningExperiment instancié")
     return dm, experiment
 
+def build_m3_2_experiment(config: dict) -> tuple:
+    """
+    Builder pour M3.2 — fusion par attention + co-adaptation DoRA.
+
+    Même squelette que build_m3_experiment (résolution base learners →
+    set_m3_preprocessing → modèle → LightningExperiment), mais :
+      - modèle = M32CoAdaptationFusion (DoRA sur les dernières couches),
+      - d_tab passé explicitement (B.2 ; 0 tant que le tabulaire n'est pas
+        injecté dans le MultimodalDataset — cf. commit 4-bis),
+      - image_transform = siglip._eval_transform (méthode β).
+    Résolution STATIQUE attendue (section base_learners dans le YAML).
+    """
+    print("[build_m3_2] START")
+
+    mlflow_cfg = config["mlflow"]
+    tracking_uri = (
+        os.getenv("MLFLOW_TRACKING_URI")
+        or mlflow_cfg.get("tracking_uri")
+        or "http://mlflow:5000"
+    )
+    mlflow.set_tracking_uri(tracking_uri)
+
+    bl = _resolve_m3_base_learners(config, tracking_uri)
+    text_encoder = bl["text_encoder"]
+    image_encoder = bl["image_encoder"]
+    print(
+        f"[build_m3_2] Base learners résolus:\n"
+        f"  text  = {bl['text_name']} v{bl['text_version']} ({bl['text_embed_dim']}d)\n"
+        f"  image = {bl['image_name']} v{bl['image_version']} ({bl['image_embed_dim']}d)"
+    )
+
+    tags = config.setdefault("mlflow", {}).setdefault("tags", {})
+    tags["base_text"] = bl["text_name"]
+    tags["base_text_version"] = str(bl["text_version"])
+    tags["base_image"] = bl["image_name"]
+    tags["base_image_version"] = str(bl["image_version"])
+
+    dm_cfg = config["datamodule"]
+    dm = RakutenLightningDataModule(
+        mode=dm_cfg.get("mode", "raw_for_finetune"),
+        batch_size=dm_cfg.get("batch_size", 16),
+        num_workers=dm_cfg.get("num_workers", 4),
+        val_size=dm_cfg.get("val_size", 0.10),
+        random_state=dm_cfg.get("random_state", 42),
+        limit=config.get("limit"),
+        train_batches=dm_cfg.get("train_batches", [1]),
+        exclude_gold=dm_cfg.get("exclude_gold", True),
+    )
+    dm.set_m3_preprocessing(
+        tokenizer=text_encoder.tokenizer,
+        max_len=bl["max_len"],
+        image_transform=image_encoder._eval_transform,   # SigLIP β
+    )
+
+    model_cfg = config.get("model", {})
+    d_tab = model_cfg.get("d_tab", 0)
+    model = M32CoAdaptationFusion(
+        text_net=text_encoder.net,
+        image_net=image_encoder.net,
+        d_text=bl["text_embed_dim"],
+        d_image=bl["image_embed_dim"],
+        d_tab=d_tab,
+        config=model_cfg,
+    )
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[build_m3_2] M3.2 instancié — {n_params:,} params entraînables (d_tab={d_tab})")
+
+    experiment = LightningExperiment(model=model, dm=dm, config=config)
+    print("[build_m3_2] LightningExperiment instancié")
+    return dm, experiment
 
 # Registry des constructeurs par expérience.
 EXPERIMENT_BUILDERS = {
@@ -674,6 +770,7 @@ EXPERIMENT_BUILDERS = {
     "m3_attention_fusion_best": build_m3_experiment,
     "m3_hpo": build_m3_hpo_experiment,
     "m3_hpo_best": build_m3_experiment,
+    "m3_2_coadaptation": build_m3_2_experiment,
     "base_learner_textcnn": build_base_learner_experiment,
     "base_learner_resnet50_partial_ft": build_base_learner_experiment,
     "base_learner_camembert_lora": build_base_learner_experiment,
@@ -852,6 +949,8 @@ def cmd_submit_cloud(args, config: dict):
     ]
     if args.limit is not None:
         pod_command += ["--limit", str(args.limit)]
+    if getattr(args, "overrides", None):
+        pod_command += ["--set", *args.overrides]
     
     # Résolution MLflow tracking URI :
     # - Si fourni explicitement (CLI ou env) ET hors localhost : on garde tel quel
@@ -1069,6 +1168,16 @@ def main():
         default=None,
         help="(fetch_logs only) Job ID RunPod du pod dont on veut les logs",
     )
+    parser.add_argument(
+        "--set",
+        dest="overrides",
+        nargs="*",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Overrides config en notation pointée, sans rebuild. Ex: "
+             "--set model.dora_rank=8 model.dora_last_n=2 model.lr_dora=2e-4 "
+             "trainer.max_epochs=15. Typage via yaml.",
+    )
     
     args = parser.parse_args()
 
@@ -1076,6 +1185,8 @@ def main():
     config = load_config(args.experiment)
     if args.limit is not None:
         config["limit"] = args.limit
+    if args.overrides:
+        apply_overrides(config, args.overrides)
     print(f"[Runner] Config chargée : {args.experiment} (limit={args.limit})")
 
 

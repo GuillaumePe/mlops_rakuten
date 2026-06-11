@@ -1,0 +1,72 @@
+# Configuration M3.2 — fusion par attention + CO-ADAPTATION DoRA.
+#
+# Résolution STATIQUE des base learners : on épingle explicitement les encodeurs
+# co-adaptés (on ne veut pas suivre un alias @active_* mouvant pour décider quoi
+# DoRA-er). Le loader statique charge models:/<registry_name>@active.
+#
+# /!\ Vérifie les noms EXACTS des registered models dans MLflow : le loader fait
+#     un match exact. Si ton registry utilise des tirets
+#     (rakuten-base-camembert-lora), adapte registry_name ci-dessous.
+
+datamodule:
+  mode: raw_for_finetune
+  batch_size: 8          # < M3 (32) : le gradient remonte dans les encodeurs → VRAM.
+                          # OOM ? descends à 8, ou active le gradient checkpointing.
+  num_workers: 8
+  val_size: 0.10
+  random_state: 42
+  train_batches: [1]
+  exclude_gold: true
+
+# Mode STATIQUE — encodeurs épinglés (vs résolution dynamique @active_*).
+base_learners:
+  text:
+    registry_name: "rakuten-base-camembert_lora"
+    name: camembert_lora
+    max_len: 300
+  image:
+    registry_name: "rakuten-base-siglip2"
+    name: siglip2
+
+model:
+  # --- fusion (AttentionFusionModuleV2) ---
+  d_model: 512
+  n_heads: 8
+  n_layers: 2
+  dim_ff_factor: 4
+  dropout: 0.3
+  n_classes: 27
+  pooling: attention      # B.1 — pooling par attention (vs mean-pool de M3)
+  d_tab: 0                # B.2 — 0 pour ce run ; passe à 12 APRÈS le commit 4-bis
+                          #       (injection du tabulaire dans le MultimodalDataset)
+  # --- co-adaptation DoRA (B.3) ---
+  dora_last_n: 1          # nb de dernières couches d'attention adaptées par encodeur
+  dora_rank: 4
+  dora_alpha: 8
+  dora_dropout: 0.05
+  # --- optimisation ---
+  lr: 5.0e-4              # module de fusion
+  lr_dora: 1.0e-4         # adapters DoRA (bas : on est près du full-FT à r=4)
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+
+trainer:
+  max_epochs: 20
+  patience: 3
+  precision: "bf16-mixed"   # cohérent avec l'entraînement SigLIP
+  accelerator: auto
+
+mlflow:
+  experiment_name: M3_2_coadaptation
+  run_name: M3_2_dora_v1
+  tracking_uri: http://mlflow:5000
+  tags:
+    model_family: M3_2
+    model_variant: coadaptation_dora
+    architecture: attention_pooling_dora_fusion
+    phase: phase_2
+    resolution: static_base_learners
+
+promotion:
+  registry_model_name: "rakuten-m3-2-coadaptation"
+  threshold: 0.005
