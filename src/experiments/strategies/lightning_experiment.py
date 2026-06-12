@@ -35,7 +35,10 @@ from __future__ import annotations
 import logging
 import time
 from typing import Optional
- 
+import tempfile
+from pathlib import Path
+import polars as pl
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -59,7 +62,11 @@ from sklearn.metrics import (
 )
  
 from src.experiments.strategies._metrics import expected_calibration_error
- 
+from src.experiments.visualizations import (
+    log_calibration_plots_to_mlflow,
+    select_hard_classes,
+    one_vs_rest_plot,
+) 
  
 logger = logging.getLogger(__name__)
  
@@ -189,14 +196,17 @@ class LightningExperiment:
             logger.info("[LightningExperiment.3] Eval gold")
             y_pred, y_proba = self._predict_gold(gold_loader)
             self._log_gold_metrics(gold_labels, y_pred, y_proba)
+            self._save_gold_predictions(
+                self.dm.get_gold_productids(), gold_labels, y_proba
+            )
  
             # ========================================================== #
             # 4. Log model + artifacts                                     #
             # ========================================================== #
             logger.info("[LightningExperiment.4] Log model + artifacts")
-            self._log_artifacts(gold_labels, y_pred)
+            self._log_artifacts(gold_labels, y_pred, y_proba)
             n_params = sum(
-                p.numel() for p in self.model.fusion.parameters()
+                p.numel() for p in self.model.parameters() if p.requires_grad
             )
             mlflow.log_metric("model/n_trainable_params", n_params)
  
@@ -242,7 +252,7 @@ class LightningExperiment:
         )
  
         callbacks = [
-            EarlyStopping(monitor="val/f1_weighted", patience=3, mode="max", verbose=True,),
+            EarlyStopping(monitor="val/f1_weighted", patience=self.patience, mode="max", verbose=True,),
             ModelCheckpoint(monitor="val/f1_weighted", mode="max", save_top_k=1),
         ]
  
@@ -259,14 +269,18 @@ class LightningExperiment:
     def _predict_gold(self, gold_loader) -> tuple[np.ndarray, np.ndarray]:
         """
         Forward sur le gold set → (predictions, probabilities).
- 
-        Itère manuellement sur le gold_loader au lieu d'utiliser
-        Trainer.predict() pour éviter l'overhead (DDP, etc.) et
-        garder le contrôle sur le device.
+
+        FIX device : on FORCE cuda si dispo au lieu de déduire le device des
+        params. Après trainer.fit(), Lightning peut faire un teardown qui remet
+        le modèle sur CPU → sinon le forward des encodeurs tourne sur CPU (très
+        lent, surtout pour M3.2 à deux encodeurs complets). + autocast bf16,
+        cohérent avec l'entraînement bf16-mixed.
         """
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(device)
         self.model.eval()
-        device = next(self.model.fusion.parameters()).device
- 
+        use_amp = device.type == "cuda"
+
         all_logits = []
         with torch.no_grad():
             for batch in gold_loader:
@@ -275,13 +289,13 @@ class LightningExperiment:
                     for k, v in batch.items()
                     if isinstance(v, torch.Tensor) and k != "label"
                 }
-                logits = self.model(batch)
-                all_logits.append(logits.cpu())
- 
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                    logits = self.model(batch)
+                all_logits.append(logits.float().cpu())
+
         logits = torch.cat(all_logits, dim=0)
         proba = F.softmax(logits, dim=-1).numpy().astype(np.float32)
         preds = logits.argmax(dim=-1).numpy()
- 
         return preds, proba
  
     def _log_gold_metrics(
@@ -323,27 +337,64 @@ class LightningExperiment:
         )
  
     def _log_artifacts(
-        self, y_true: np.ndarray, y_pred: np.ndarray
+        self, y_true: np.ndarray, y_pred: np.ndarray, y_proba: np.ndarray
     ) -> None:
-        """Confusion matrix + classification report."""
+        """Confusion matrix + report + calibration + OvR hard classes (gold)."""
         # --- Confusion matrix ---
         cm = confusion_matrix(y_true, y_pred)
         fig, ax = plt.subplots(figsize=(12, 10))
         sns.heatmap(
             cm, annot=False, fmt="d", cmap="Blues", ax=ax,
-            xticklabels=range(cm.shape[0]),
-            yticklabels=range(cm.shape[0]),
+            xticklabels=range(cm.shape[0]), yticklabels=range(cm.shape[0]),
         )
         ax.set_xlabel("Predicted")
         ax.set_ylabel("True")
         ax.set_title(f"Confusion matrix — {self.run_name}")
         mlflow.log_figure(fig, "confusion_matrix.png")
         plt.close(fig)
- 
+
         # --- Classification report ---
         report = classification_report(y_true, y_pred, digits=3)
         mlflow.log_text(report, "classification_report.txt")
+
+        # --- Calibration (reliability + confidence + margin) — module partagé
+        #     avec sklearn_experiment → même diagnostic que m2_stacking.
+        log_calibration_plots_to_mlflow(
+            y_true=y_true, p_pred=y_proba, prefix="calibration/gold",
+        )
+
+        # --- One-vs-Rest sur les classes les plus difficiles du gold ---
+        hard = select_hard_classes(y_true, y_proba, top_k=6, min_support=20)
+        mlflow.log_param("hard_classes_gold", str(hard))
+        fig = one_vs_rest_plot(
+            y_true, y_proba,
+            classes_to_plot=hard,
+            title=f"OvR classes difficiles — gold ({self.run_name})",
+        )
+        mlflow.log_figure(fig, "class_breakdown/one_vs_rest_hard_classes_gold.png")
+        plt.close(fig)
  
+    def _save_gold_predictions(
+        self, productids: np.ndarray, y_true: np.ndarray, y_proba: np.ndarray
+    ) -> None:
+        """
+        Sauve les probas gold alignées sur productid → artifact parquet.
+
+        Clé = productid (hash MD5 déterministe, identique à travers tous les
+        modèles) → A.4 (meta-stack M_final) joint les probas M3.2 à celles de
+        m2_best SANS dépendre de l'ordre des lignes.
+        Colonnes : productid, label, p_0..p_{n-1}.
+        """
+        n_classes = y_proba.shape[1]
+        data = {"productid": productids, "label": y_true}
+        for c in range(n_classes):
+            data[f"p_{c}"] = y_proba[:, c]
+        df = pl.DataFrame(data)
+        tmp = Path(tempfile.mkdtemp()) / "gold_predictions.parquet"
+        df.write_parquet(tmp)
+        mlflow.log_artifact(str(tmp), artifact_path="predictions")
+        logger.info(f"  Probas gold sauvées : {df.height} lignes × {n_classes} classes")
+
     def _handle_promotion(self, f1_gold: float, run_id: str) -> None:
         """
         Promotion conditionnelle @champion.
