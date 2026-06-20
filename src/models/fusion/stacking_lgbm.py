@@ -525,9 +525,12 @@ class StackingLGBM:
 
         p_text = self.f_text_.predict_proba(X_text)
         p_image = self.f_image_.predict_proba(X_image)
-        p_text_cal = self._apply_temperature(p_text, self.T_text_ or 1.0)
-        p_image_cal = self._apply_temperature(p_image, self.T_image_ or 1.0)
-        derived = self._derived_features(p_text_cal, p_image_cal)
+        T_text = getattr(self, "T_text_", 1.0) or 1.0
+        T_image = getattr(self, "T_image_", 1.0) or 1.0
+        p_text_cal = self._apply_temperature(p_text, T_text)
+        p_image_cal = self._apply_temperature(p_image, T_image)
+        has_calibration = hasattr(self, "T_text_")
+        derived = self._derived_features(p_text_cal, p_image_cal) if has_calibration else None
         meta_X = self._build_meta_X(p_text_cal, p_image_cal, X_tab, derived)
 
         return self.meta_.predict(meta_X)
@@ -543,9 +546,12 @@ class StackingLGBM:
 
         p_text = self.f_text_.predict_proba(X_text)
         p_image = self.f_image_.predict_proba(X_image)
-        p_text_cal = self._apply_temperature(p_text, self.T_text_ or 1.0)
-        p_image_cal = self._apply_temperature(p_image, self.T_image_ or 1.0)
-        derived = self._derived_features(p_text_cal, p_image_cal)
+        T_text = getattr(self, "T_text_", 1.0) or 1.0
+        T_image = getattr(self, "T_image_", 1.0) or 1.0
+        p_text_cal = self._apply_temperature(p_text, T_text)
+        p_image_cal = self._apply_temperature(p_image, T_image)
+        has_calibration = hasattr(self, "T_text_")
+        derived = self._derived_features(p_text_cal, p_image_cal) if has_calibration else None
         meta_X = self._build_meta_X(p_text_cal, p_image_cal, X_tab, derived)
 
         return self.meta_.predict_proba(meta_X)
