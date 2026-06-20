@@ -384,19 +384,19 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self._val_selection_version = get_active_val_selection_version()
         val_sel_col = f"is_val_selection_v{self._val_selection_version}"
     
-        # Pour raw_for_finetune, on ne peut pas utiliser le val_selection versionné
-        # (il n'existe que dans le cache parquet). Fallback : créer un val_selection ad-hoc
-        # 10% aléatoire stratifié sur les labels.
-        n_total = len(self._df_full)
-        idx = np.arange(n_total)
-        labels = self._df_full.get_column("label").to_numpy()
-    
-        idx_pool, idx_val_sel = train_test_split(
-            idx,
-            test_size=0.10,
-            stratify=labels,
-            random_state=self.random_state,
+        # Lire le val_selection versionné depuis Mongo
+        val_sel_col = f"is_val_selection_v{self._val_selection_version}"
+        pid_list = self._df_full.get_column("productid").to_list()
+        val_sel_map = self._fetch_val_selection_from_mongo(pid_list)
+        self._df_full = self._df_full.with_columns(
+            pl.Series(val_sel_col, [val_sel_map.get(pid, False) for pid in pid_list])
         )
+        val_sel_productids = {pid for pid, v in val_sel_map.items() if v}
+        logger.info(
+            f"[DataModule._setup_raw_for_finetune] {val_sel_col} : "
+            f"{len(val_sel_productids)} val_selection depuis Mongo"
+        )
+
     
         # 5. Appliquer les masks
         mask_pool = pl.col("batch_id").is_in(self.train_batches)
@@ -405,8 +405,6 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
     
         self._df_train_pool = self._df_full.filter(mask_pool)
     
-        # val_selection : intersection de pool + idx_val_sel
-        val_sel_productids = set(self._df_full[idx_val_sel.tolist()]["productid"].to_list())
         mask_val_selection = mask_pool & pl.col("productid").is_in(val_sel_productids)
         self._df_val_selection = self._df_full.filter(mask_val_selection)
     
@@ -447,6 +445,22 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             f"val_selection≈10%={n_val_sel} | gold={n_gold} | "
             f"train={len(self._df_train)} | val={len(self._df_val)}"
         )
+
+    def _fetch_val_selection_from_mongo(self, pid_list: list) -> dict[int, bool]:
+        """
+        Lit is_val_selection_v{n} depuis Mongo.
+
+        Returns:
+            {productid: True/False} pour chaque pid dans pid_list.
+        """
+        val_sel_col = f"is_val_selection_v{self._val_selection_version}"
+        client = MongoClient(MONGO_URI)
+        db = client[DB_NAME]
+        docs = db["X_raw_data_batches"].find(
+            {"productid": {"$in": pid_list}},
+            {"_id": 0, "productid": 1, val_sel_col: 1},
+        )
+        return {d["productid"]: bool(d.get(val_sel_col, False)) for d in docs}
 
 
     def setup(self, stage: str | None = None):
@@ -613,15 +627,23 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         # ─────────────────────────────────────────────────────────────────────
         val_sel_col = f"is_val_selection_v{self._val_selection_version}"
         if val_sel_col not in df.columns:
-            logger.warning(
-                f"[DataModule] {val_sel_col} absente du cache. "
-                f"val_selection indisponible — train_pool_effective = train_pool. "
-                f"OK pour SklearnExperiment (stacking), "
-                f"mais BaseLearnerExperiment échouera à l'eval."
+            logger.info(
+                f"[DataModule] {val_sel_col} absente du cache, "
+                f"migration depuis Mongo..."
             )
-            # Ajouter une colonne False partout pour que le reste du setup fonctionne
-            df = df.with_columns(pl.lit(False).alias(val_sel_col))
+            pid_list = df.get_column("productid").to_list()
+            val_sel_map = self._fetch_val_selection_from_mongo(pid_list)
+            df = df.with_columns(
+                pl.Series(val_sel_col, [val_sel_map.get(pid, False) for pid in pid_list])
+            )
+            df.write_parquet(self.cache_path)
             self._df_full = df
+            n_val = sum(1 for v in val_sel_map.values() if v)
+            logger.info(
+                f"[DataModule] {val_sel_col} migrée depuis Mongo : "
+                f"{n_val} val_selection. Cache mis à jour."
+            )
+
 
         # Niveau 1 — train_pool : batches autorisés AND not gold (inchangé)
         # Utilisé par les assembled qui n'arbitrent pas @active (M2, M3, ...).

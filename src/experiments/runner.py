@@ -41,6 +41,7 @@ from src.models.base_learners._pyfunc_wrapper import BaseLearnerPyfunc
 from torch.utils.data import DataLoader
 from src.models.assembled.m3_2_coadaptation import M32CoAdaptationFusion
 from src.experiments.strategies.hpo_lightning_experiment import HPOLightningExperiment
+from src.models.predict_pending import run_predict_pending
 
 # Registre des dimensions d'embeddings par base learner.
 # Utilisé par build_m2_best_experiment pour résoudre embed_dim
@@ -1122,7 +1123,7 @@ def main():
     )
     parser.add_argument(
         "--action", required=True,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner","fit_lightning", "submit_cloud", "smoke_tailscale","fetch_logs","hpo_lightning","complete_cache"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner","fit_lightning", "submit_cloud", "smoke_tailscale","fetch_logs","hpo_lightning","complete_cache","predict_pending","ingest_batch"],
         help="Action à exécuter",
     )
     parser.add_argument(
@@ -1137,7 +1138,7 @@ def main():
     parser.add_argument(
         "--cloud-action",
         default=None,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner","fit_lightning","hpo_lightning","complete_cache"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner","fit_lightning","hpo_lightning","complete_cache","predict_pending"],
         help="(submit_cloud only) Quelle action le pod cloud doit exécuter",
     )
     parser.add_argument(
@@ -1179,6 +1180,13 @@ def main():
              "trainer.max_epochs=15. Typage via yaml.",
     )
     
+    parser.add_argument(
+        "--batch",
+        type=int,
+        default=None,
+        help="(ingest_batch only) Numéro du batch à ingérer (1, 2, 3, ...)",
+    )
+
     args = parser.parse_args()
 
     # Charger la config
@@ -1210,6 +1218,20 @@ def main():
     # smoke_tailscale : test de bout en bout sans construire DataModule/Experiment
     if args.action == "smoke_tailscale":
         cmd_smoke_tailscale()
+        return
+
+    # predict_pending : action autonome (pas de DataModule/Experiment)
+    if args.action == "predict_pending":
+        
+        result = run_predict_pending(model_name=config.get("model_name", "rakuten-m2-best"))
+        print(f"[Runner] predict_pending result: {result}")
+        return
+    if args.action == "ingest_batch":
+        if args.batch is None:
+            parser.error("--batch requis pour l'action ingest_batch")
+        from src.data.ingest_batch import run_ingest_batch
+        result = run_ingest_batch(batch_id=args.batch)
+        print(f"[Runner] ingest_batch result: {result}")
         return
 
     # Init MLflow seulement pour les actions qui en ont besoin
