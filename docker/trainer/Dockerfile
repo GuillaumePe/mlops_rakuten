@@ -49,6 +49,8 @@ COPY data/ /workspace/data/
 COPY docker/trainer/entrypoint.sh /workspace/entrypoint.sh
 RUN chmod +x /workspace/entrypoint.sh
 
+COPY docker/trainer/mongo_tunnel.py /workspace/mongo_tunnel.py
+
 # === Sanity check au build ===
 # Vérifie qu'on peut au moins importer les modules clés
 # + valide la présence de sm_120 dans les architectures CUDA compilées

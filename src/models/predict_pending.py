@@ -26,8 +26,7 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
-from pymongo import MongoClient
-
+from src.data.mongo_utils import get_db
 from src.models.rakuten_scorer import RakutenScorer
 from dotenv import load_dotenv
 load_dotenv()
@@ -38,8 +37,7 @@ logger = logging.getLogger(__name__)
 # Constantes                                                          #
 # ------------------------------------------------------------------ #
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = "MAR25_CMLOPS_RAKUTEN"
+
 DATA_ROOT = Path(os.getenv("DATA_ROOT", "."))
 IMAGE_FOLDER_TEST = DATA_ROOT / "data/raw_data_test/images_test"
 
@@ -69,9 +67,7 @@ def run_predict_pending(
     Returns:
         dict avec message, nb scored, model@version, etc.
     """
-    mongo_uri = mongo_uri or MONGO_URI
-    client = MongoClient(mongo_uri)
-    db = client[DB_NAME]
+    db = get_db(uri=mongo_uri) if mongo_uri else get_db()
 
     # ------------------------------------------------------------ #
     # 1. Vérifier le seuil                                          #

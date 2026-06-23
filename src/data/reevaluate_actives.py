@@ -22,13 +22,12 @@ from pymongo import MongoClient
 from sklearn.metrics import f1_score
 
 from src.features.utils import clean_description
-
+from src.data.mongo_utils import get_db
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = "MAR25_CMLOPS_RAKUTEN"
+
 DATA_ROOT = Path(os.getenv("DATA_ROOT", "."))
 IMAGE_FOLDER_TRAIN = DATA_ROOT / "data/raw_data/images/image_train"
 
@@ -44,7 +43,7 @@ def run_reevaluate_actives(
     """
     Re-score tous les base learners @active sur val_selection_v{version}.
     """
-    mongo_uri = mongo_uri or MONGO_URI
+    
     if not tracking_uri:
         tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
 
@@ -56,8 +55,7 @@ def run_reevaluate_actives(
     # ------------------------------------------------------------ #
     # 1. Charger val_selection depuis Mongo                         #
     # ------------------------------------------------------------ #
-    client_mongo = MongoClient(mongo_uri)
-    db = client_mongo[DB_NAME]
+    db = get_db(uri=mongo_uri) if mongo_uri else get_db()
 
     n_val = db["X_raw_data_batches"].count_documents({field_name: True})
     if n_val == 0:

@@ -56,28 +56,6 @@ def batch_training():
 
 batch_training_instance = batch_training()
 
-# === DAG Predict (production-ready) ===
-@dag(
-    dag_id="Predict",
-    schedule="*/10 * * * *",
-    start_date=days_ago(1),
-    tags=["MAR25_CMLOPS_RAKUTEN"],
-    catchup=False,
-)
-def predict():
-
-    @task(pool="training_pool")
-    def trigger_predict_pending():
-        headers = get_auth_headers()
-        response = requests.post("http://api:8000/predict_pending", headers=headers)
-        if response.status_code != 200:
-            raise Exception(f"API {response.status_code}: {response.text}")
-        return response.json()
-
-    trigger_predict_pending()
-
-
-predict_instance = predict()
 
 # === DAG SimulateDataArrival (simulation) ===
 # injecte de la donnéee de manière random de X_to_predict_pool à X_to_predict ppur simuler l'arrivée de nouvelle données à prédire

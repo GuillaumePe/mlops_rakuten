@@ -146,6 +146,22 @@ else
     echo "[tailscale] TAILSCALE_AUTHKEY non défini, skip setup tailnet (mode legacy)"
 fi
 
+# ── MongoDB tunnel via SOCKS5 ──────────────────────────────────
+if [ -n "${MONGO_PROXY_HOST:-}" ] && [ -n "${MONGO_URI:-}" ]; then
+    MONGO_REMOTE_HOST=$(python3 -c "from urllib.parse import urlparse; print(urlparse('${MONGO_URI}').hostname)")
+    MONGO_REMOTE_PORT=$(python3 -c "from urllib.parse import urlparse; print(urlparse('${MONGO_URI}').port or 27017)")
+    echo "[mongo-tunnel] Démarrage tunnel localhost:27018 → ${MONGO_REMOTE_HOST}:${MONGO_REMOTE_PORT} via SOCKS5"
+    python3 /workspace/mongo_tunnel.py \
+        --remote-host "${MONGO_REMOTE_HOST}" \
+        --remote-port "${MONGO_REMOTE_PORT}" \
+        --local-port 27018 \
+        --proxy-host "${MONGO_PROXY_HOST}" \
+        --proxy-port "${MONGO_PROXY_PORT:-1055}" &
+    sleep 1
+    export MONGO_URI="mongodb://localhost:27018"
+    echo "[mongo-tunnel] MONGO_URI réécrit → mongodb://localhost:27018"
+fi
+
 # ============================================================
 # Configuration DVC pour R2
 # ============================================================

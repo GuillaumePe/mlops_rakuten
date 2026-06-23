@@ -41,7 +41,7 @@ from src.models.base_learners._pyfunc_wrapper import BaseLearnerPyfunc
 from torch.utils.data import DataLoader
 from src.models.assembled.m3_2_coadaptation import M32CoAdaptationFusion
 from src.experiments.strategies.hpo_lightning_experiment import HPOLightningExperiment
-from src.models.predict_pending import run_predict_pending
+
 
 # Registre des dimensions d'embeddings par base learner.
 # Utilisé par build_m2_best_experiment pour résoudre embed_dim
@@ -878,6 +878,13 @@ def cmd_smoke_tailscale():
         os.unlink(artifact_path)
 
         print("[smoke] OK : run + param + metric + artifact loggés")
+    # Test MongoDB via Tailscale (utilise le proxy SOCKS5 si MONGO_PROXY_HOST défini)
+    from src.data.mongo_utils import get_db
+    print(f"[smoke] MONGO_URI : {os.getenv('MONGO_URI', '')[:50]}...")
+    db = get_db()
+    n = db["X_raw_data_batches"].count_documents({})
+    print(f"[smoke] MongoDB OK : X_raw_data_batches = {n} docs")
+
 
 def cmd_fetch_logs(args):
     """Récupère les logs d'un pod cloud depuis R2."""
@@ -921,32 +928,56 @@ def cmd_complete_cache(dm, experiment):
     print("[complete_cache] ✓ Cache réécrit + push R2")
 
 def cmd_submit_cloud(args, config: dict):
-    """
-    Soumet un job au provider cloud avec fallback sur la liste de GPUs.
-    
-    Le pod cloud va exécuter `runner.py --action <cloud-action>` après
-    avoir pull les données via DVC. Il push les nouveaux artefacts à la fin.
-    """
+    """Soumet un job au provider cloud."""
     import time
     from src.cloud.factory import get_cloud_provider
     from src.cloud.base import JobConfig, GPUSpec, VolumeMount, JobStatus
     from src.cloud.exceptions import JobSubmissionError
-    
+
     if args.cloud_action is None:
         raise ValueError("--cloud-action requis pour --action submit_cloud")
-    
-    # Image Docker (priorité : CLI > env > défaut)
+
+    # ── Tailscale : résolution unique ──────────────────────────────
+    ts_ip = get_local_tailscale_ip()
+    tailscale_authkey = os.getenv("TAILSCALE_AUTHKEY", "")
+    if not tailscale_authkey:
+        raise RuntimeError(
+            "TAILSCALE_AUTHKEY manquante dans .env. "
+            "Génère une auth key pod (reusable=true, ephemeral=true) "
+            "dans le dashboard Tailscale."
+        )
+
+    # URIs dérivées pour le pod (tout passe par Tailscale)
+    mlflow_uri_for_pod = f"http://{ts_ip}:5000"
+    mongo_uri_for_pod = f"mongodb://{ts_ip}:27017"
+
+    # Override MLflow si URI explicite non-locale fournie
+    mlflow_uri_override = (
+        args.mlflow_tracking_uri
+        or os.getenv("MLFLOW_TRACKING_URI", "")
+    )
+    local_hosts = ("localhost", "127.0.0.1", "mlflow:5000")
+    if mlflow_uri_override and not any(h in mlflow_uri_override for h in local_hosts):
+        mlflow_uri_for_pod = mlflow_uri_override
+
+    print(f"[submit_cloud] Tailscale IP : {ts_ip}")
+    print(f"[submit_cloud] MLflow pod   : {mlflow_uri_for_pod}")
+    print(f"[submit_cloud] Mongo pod    : {mongo_uri_for_pod} (via SOCKS5)")
+    # ── Fin bloc Tailscale ─────────────────────────────────────────
+
+    # Image Docker
     image = (
         args.cloud_image
         or os.getenv("GHCR_IMAGE_TRAINER")
         or f"ghcr.io/{os.getenv('GITHUB_USER', 'guillaumepe').lower()}/mlops-rakuten-trainer:latest"
     )
-    
-    # Commande à exécuter dans le pod
+
+    # Commande pod
     pod_command = [
         "python", "-m", "src.experiments.runner",
         "--experiment", args.experiment,
         "--action", args.cloud_action,
+        "--mlflow-tracking-uri", mlflow_uri_for_pod,
     ]
     if args.limit is not None:
         pod_command += ["--limit", str(args.limit)]
@@ -977,31 +1008,30 @@ def cmd_submit_cloud(args, config: dict):
     # On passe toujours l'URI résolu au pod, qu'il ait été fourni explicitement ou auto
     # (utile pour les actions qui lisent args.mlflow_tracking_uri côté pod)
     pod_command += ["--mlflow-tracking-uri", mlflow_uri_for_pod]
-    # Env vars critiques à passer au pod
+    
     pod_env = {
-        # R2 (DVC remote)
+        # R2 / DVC
         "R2_ACCESS_KEY_ID": os.getenv("R2_ACCESS_KEY_ID", ""),
         "R2_SECRET_ACCESS_KEY": os.getenv("R2_SECRET_ACCESS_KEY", ""),
-        # DVC-S3 lit AWS_*, pas R2_* — mapping nécessaire
         "AWS_ACCESS_KEY_ID": os.getenv("R2_ACCESS_KEY_ID", ""),
         "AWS_SECRET_ACCESS_KEY": os.getenv("R2_SECRET_ACCESS_KEY", ""),
-        # Pour l'upload des logs vers R2
         "R2_ENDPOINT_URL": os.getenv("R2_ENDPOINT_URL", ""),
         "R2_BUCKET_NAME": os.getenv("R2_BUCKET_NAME", "rakuten-mlops-dvc"),
-        # MongoDB Atlas
-        "MONGO_URI": os.getenv("MONGO_URI", ""),
+        # MongoDB local via Tailscale
+        "MONGO_URI": mongo_uri_for_pod,
+        "MONGO_PROXY_HOST": "localhost",
+        "MONGO_PROXY_PORT": "1055",
         "MONGO_DB_NAME": os.getenv("MONGO_DB_NAME", "MAR25_CMLOPS_RAKUTEN"),
-        # Tailscale (overlay network vers MLflow local)
+        # Tailscale
         "TAILSCALE_AUTHKEY": tailscale_authkey,
         # MLflow
         "MLFLOW_TRACKING_URI": mlflow_uri_for_pod,
-        # Self-terminate
+        # RunPod
         "RUNPOD_API_KEY": os.getenv("RUNPOD_API_KEY", ""),
-        # DATA_ROOT pour les paths
         "DATA_ROOT": "/workspace",
-        # DVC auto-push
         "DVC_AUTO_PUSH": "true",
     }
+    
     
     # Targets DVC à puller
     dvc_targets = args.cloud_dvc_targets or [
@@ -1123,7 +1153,7 @@ def main():
     )
     parser.add_argument(
         "--action", required=True,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner","fit_lightning", "submit_cloud", "smoke_tailscale","fetch_logs","hpo_lightning","complete_cache","predict_pending","ingest_batch"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner","fit_lightning", "submit_cloud", "smoke_tailscale","fetch_logs","hpo_lightning","complete_cache","predict_pending","ingest_batch","rebase_val_selection","reevaluate_actives"],
         help="Action à exécuter",
     )
     parser.add_argument(
@@ -1138,7 +1168,7 @@ def main():
     parser.add_argument(
         "--cloud-action",
         default=None,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner","fit_lightning","hpo_lightning","complete_cache","predict_pending"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner","fit_lightning","hpo_lightning","complete_cache","predict_pending","reevaluate_actives"],
         help="(submit_cloud only) Quelle action le pod cloud doit exécuter",
     )
     parser.add_argument(
@@ -1187,6 +1217,13 @@ def main():
         help="(ingest_batch only) Numéro du batch à ingérer (1, 2, 3, ...)",
     )
 
+    parser.add_argument(
+        "--version",
+        type=int,
+        default=None,
+        help="(rebase_val_selection / reevaluate_actives) Version du val_selection (1, 2, 3, ...)",
+    )
+
     args = parser.parse_args()
 
     # Charger la config
@@ -1222,7 +1259,7 @@ def main():
 
     # predict_pending : action autonome (pas de DataModule/Experiment)
     if args.action == "predict_pending":
-        
+        from src.models.predict_pending import run_predict_pending
         result = run_predict_pending(model_name=config.get("model_name", "rakuten-m2-best"))
         print(f"[Runner] predict_pending result: {result}")
         return
@@ -1232,6 +1269,20 @@ def main():
         from src.data.ingest_batch import run_ingest_batch
         result = run_ingest_batch(batch_id=args.batch)
         print(f"[Runner] ingest_batch result: {result}")
+        return
+    if args.action == "rebase_val_selection":
+        if args.version is None:
+            parser.error("--version requis pour l'action rebase_val_selection")
+        from src.data.rebase_val_selection import run_rebase_val_selection
+        result = run_rebase_val_selection(version=args.version)
+        print(f"[Runner] rebase_val_selection result: {result}")
+        return
+    if args.action == "reevaluate_actives":
+        if args.version is None:
+            parser.error("--version requis pour l'action reevaluate_actives")
+        from src.data.reevaluate_actives import run_reevaluate_actives
+        result = run_reevaluate_actives(version=args.version)
+        print(f"[Runner] reevaluate_actives result: {result}")
         return
 
     # Init MLflow seulement pour les actions qui en ont besoin

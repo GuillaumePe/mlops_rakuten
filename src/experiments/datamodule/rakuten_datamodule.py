@@ -27,7 +27,7 @@ import numpy as np
 import polars as pl
 import pytorch_lightning as pl_lightning
 import torch
-from pymongo import MongoClient
+from src.data.mongo_utils import get_mongo_client, get_db
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 import mlflow
@@ -169,8 +169,8 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
                 f"prepare_data pour mode={self.mode} sera implémenté en Phase 1+"
             )
 
-        client = MongoClient(MONGO_URI)
-        db = client[DB_NAME]
+        db = get_db()
+        
 
         # 1. Récupérer tous les productid en base (X et label)
 
@@ -313,8 +313,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         """
         logger.info("[DataModule._setup_raw_for_finetune] Chargement données brutes Mongo...")
     
-        client = MongoClient(MONGO_URI)
-        db = client[DB_NAME]
+        db = get_db()
     
         # 1. Charger X_raw_data_batches (texte + metadata)
         x_docs = list(db["X_raw_data_batches"].find(
@@ -454,8 +453,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
             {productid: True/False} pour chaque pid dans pid_list.
         """
         val_sel_col = f"is_val_selection_v{self._val_selection_version}"
-        client = MongoClient(MONGO_URI)
-        db = client[DB_NAME]
+        db = get_db()
         docs = db["X_raw_data_batches"].find(
             {"productid": {"$in": pid_list}},
             {"_id": 0, "productid": 1, val_sel_col: 1},
@@ -492,8 +490,7 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         missing_cols = [c for c in ("batch_id", "is_gold", "text") if c not in df.columns]
         if missing_cols:
             print(f"[DataModule] Cache sans {missing_cols}, migration auto depuis Mongo...")
-            client = MongoClient(MONGO_URI)
-            db = client[DB_NAME]
+            db = get_db()
             pid_list = df.get_column("productid").to_list()
             # On demande à Mongo uniquement les champs dont on a besoin
             mongo_fields = {"_id": 0, "productid": 1}

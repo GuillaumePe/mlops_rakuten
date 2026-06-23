@@ -67,6 +67,9 @@ def run_ingest_batch(
     client = MongoClient(mongo_uri)
     db = client[DB_NAME]
 
+    col = db["X_raw_data_batches"]
+    col.create_index("productid", unique=True)
+    col.create_index("batch_id")
     # ------------------------------------------------------------ #
     # 1. Vérifier que le batch existe                               #
     # ------------------------------------------------------------ #

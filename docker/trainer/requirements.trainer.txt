@@ -4,9 +4,8 @@
 # on ne les réinstalle pas pour éviter le conflit GPU/CPU wheels.
 
 # Data access
-pymongo==4.13.2
+pymongo[socks]==4.13.2
 python-dotenv==1.0.1
-
 # ML core
 scikit-learn==1.6.1
 lightgbm==4.6.0
