@@ -18,12 +18,15 @@ import mlflow
 import numpy as np
 import polars as pl
 from dotenv import load_dotenv
-from pymongo import MongoClient
+
+import torch
 from sklearn.metrics import f1_score
 
 from src.features.utils import clean_description
 from src.data.mongo_utils import get_db
 from src.data.label_encoding import encode_labels
+from src.models.utils import ensure_device
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -211,8 +214,15 @@ def _evaluate_learner(
         raise RuntimeError(f"Pas de python_model pour {uri}")
 
     learner = getattr(python_model, "learner", None)
+    ensure_device(learner)
     if learner is None:
         raise RuntimeError(f"learner est None pour {uri}")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if hasattr(learner, "net") and learner.net is not None:
+        learner.net.to(device)
+        learner.net.eval()
+        logger.info(f"    {registered_name} → {device}")
 
     y_pred_proba = learner.predict_proba(df_val)
     y_pred = y_pred_proba.argmax(axis=1)
