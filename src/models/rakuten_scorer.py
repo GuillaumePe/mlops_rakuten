@@ -50,6 +50,7 @@ import polars as pl
 import torch
 import torch.nn.functional as F
 from mlflow.tracking import MlflowClient
+from src.models.utils import ensure_device
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +371,7 @@ class _ScorerM2:
         if python_model is None:
             raise RuntimeError(f"Pas de python_model sous-jacent pour {uri}")
         learner = getattr(python_model, "learner", None)
+        ensure_device(learner)
         if learner is None:
             raise RuntimeError(f"BaseLearnerPyfunc.learner est None pour {uri}")
         return learner
@@ -564,6 +566,7 @@ class _ScorerM3:
         self._text_learner.net.eval()
         self._text_learner.net.requires_grad_(False)
         self._text_learner.net.to(self._device)
+        
 
         self._image_learner.net.eval()
         self._image_learner.net.requires_grad_(False)
@@ -614,7 +617,7 @@ class _ScorerM3:
                 f"BaseLearnerPyfunc.learner est None pour {uri}. "
                 f"load_context n'a pas été appelé ou a échoué."
             )
-
+        ensure_device(learner)
         return learner
 
     def predict(self, raw_df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:

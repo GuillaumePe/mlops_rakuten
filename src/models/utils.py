@@ -728,3 +728,25 @@ def compute_promotion_decision(
     return delta > threshold
 
  
+def ensure_device(model_or_learner, device=None):
+    """
+    Migre un modèle/learner vers GPU si disponible.
+    
+    Gère les deux patterns :
+    - BaseLearner avec .net (CamemBERT, ResNet, SigLIP, TextCNN)
+    - Module PyTorch direct (M3AttentionFusion, M32CoAdaptation)
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Pattern BaseLearner (net interne)
+    if hasattr(model_or_learner, "net") and model_or_learner.net is not None:
+        model_or_learner.net.to(device)
+        model_or_learner.net.eval()
+    
+    # Pattern Module PyTorch direct (M3, M3.2)
+    elif hasattr(model_or_learner, "to") and hasattr(model_or_learner, "eval"):
+        model_or_learner.to(device)
+        model_or_learner.eval()
+    
+    return device
