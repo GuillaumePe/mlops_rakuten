@@ -23,6 +23,7 @@ from sklearn.metrics import f1_score
 
 from src.features.utils import clean_description
 from src.data.mongo_utils import get_db
+from src.data.label_encoding import encode_labels
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -216,4 +217,8 @@ def _evaluate_learner(
     y_pred_proba = learner.predict_proba(df_val)
     y_pred = y_pred_proba.argmax(axis=1)
 
-    return f1_score(y_val, y_pred, average="weighted")
+    # y_val contient des prdtypecodes bruts (10, 40, ...) depuis Mongo
+    # y_pred contient des indices (0-26) depuis predict_proba.argmax
+    y_val_encoded = np.array(encode_labels(y_val))
+
+    return f1_score(y_val_encoded, y_pred, average="weighted")

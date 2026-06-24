@@ -1264,24 +1264,27 @@ def main():
         print(f"[Runner] predict_pending result: {result}")
         return
     if args.action == "ingest_batch":
-        if args.batch is None:
+        batch_id = args.batch or config.get("batch")
+        if batch_id is None:
             parser.error("--batch requis pour l'action ingest_batch")
         from src.data.ingest_batch import run_ingest_batch
-        result = run_ingest_batch(batch_id=args.batch)
+        result = run_ingest_batch(batch_id=int(batch_id))
         print(f"[Runner] ingest_batch result: {result}")
         return
     if args.action == "rebase_val_selection":
-        if args.version is None:
+        version = args.version or config.get("version")
+        if version is None:
             parser.error("--version requis pour l'action rebase_val_selection")
         from src.data.rebase_val_selection import run_rebase_val_selection
-        result = run_rebase_val_selection(version=args.version)
+        result = run_rebase_val_selection(version=int(version))
         print(f"[Runner] rebase_val_selection result: {result}")
         return
     if args.action == "reevaluate_actives":
-        if args.version is None:
+        version = args.version or config.get("version")
+        if version is None:
             parser.error("--version requis pour l'action reevaluate_actives")
         from src.data.reevaluate_actives import run_reevaluate_actives
-        result = run_reevaluate_actives(version=args.version)
+        result = run_reevaluate_actives(version=int(version))
         print(f"[Runner] reevaluate_actives result: {result}")
         return
 

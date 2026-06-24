@@ -28,6 +28,7 @@ import numpy as np
 import polars as pl
 from src.data.mongo_utils import get_db
 from src.models.rakuten_scorer import RakutenScorer
+from src.data.label_encoding import decode_labels
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -135,7 +136,7 @@ def run_predict_pending(
             "productid": row["productid"],
             "designation": row["designation"],
             "imageid": row["imageid"],
-            "prediction": int(result.predictions[i]),
+            "prediction": int(decode_labels([result.predictions[i]])[0]),
             "confidence": float(result.probas[i].max()),
             "date_pred": now,
             "model": model_tag,
