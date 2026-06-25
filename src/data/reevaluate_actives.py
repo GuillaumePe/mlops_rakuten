@@ -214,10 +214,10 @@ def _evaluate_learner(
         raise RuntimeError(f"Pas de python_model pour {uri}")
 
     learner = getattr(python_model, "learner", None)
-    ensure_device(learner)
+    
     if learner is None:
         raise RuntimeError(f"learner est None pour {uri}")
-
+    ensure_device(learner)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if hasattr(learner, "net") and learner.net is not None:
         learner.net.to(device)

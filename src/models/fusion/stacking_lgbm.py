@@ -505,7 +505,10 @@ class StackingLGBM:
             force_col_wise=True,
             verbosity=-1,
         )
-        self.meta_.fit(meta_X, y_train)
+        init_model = getattr(self, "_warm_start_init_model", None)
+        self.meta_.fit(meta_X, y_train, init_model=init_model)
+        if init_model:
+            print(f"[StackingLGBM] Warm-start : refit avec init_model")
         print(f"[StackingLGBM] Meta refit terminé sur {len(y_train)} samples avec {best_iter_for_refit} arbres")
 
         return self

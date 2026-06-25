@@ -328,13 +328,14 @@ def build_m2_experiment(config: dict) -> tuple[RakutenLightningDataModule, Sklea
         "promotion_epsilon": str(promotion_cfg.get("epsilon", 0.005)),
     }
 
+    if config.get("warm_start_from"):
+        combined_tags["_warm_start_from"] = config["warm_start_from"]
+    
     experiment = SklearnExperiment(
         model_factory=m2_factory,
         run_name=config["mlflow"]["run_name"],
         tags=combined_tags,
     )
-    if config.get("warm_start_from"):
-        combined_tags["_warm_start_from"] = config["warm_start_from"]
 
     return dm, experiment
 
@@ -383,13 +384,15 @@ def build_m2_baseline_experiment(config: dict) -> tuple[RakutenLightningDataModu
         "promotion_epsilon": str(promotion_cfg.get("epsilon", 0.005)),
     }
 
+    if config.get("warm_start_from"):
+        combined_tags["_warm_start_from"] = config["warm_start_from"]
+
     experiment = SklearnExperiment(
         model_factory=m2_baseline_factory,
         run_name=config["mlflow"]["run_name"],
         tags=combined_tags,
     )
-    if config.get("warm_start_from"):
-        combined_tags["_warm_start_from"] = config["warm_start_from"]
+
     return dm, experiment
 
 def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataModule, SklearnExperiment]:
@@ -477,13 +480,14 @@ def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataMod
         "promotion_epsilon": str(promotion_cfg.get("epsilon", 0.005)),
     }
  
+    if config.get("warm_start_from"):
+        combined_tags["_warm_start_from"] = config["warm_start_from"]
+    
     experiment = SklearnExperiment(
         model_factory=m2_assembled_factory,
         run_name=config["mlflow"]["run_name"],
         tags=combined_tags,
     )
-    if config.get("warm_start_from"):
-        combined_tags["_warm_start_from"] = config["warm_start_from"]
     return dm, experiment
 
 def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataModule, BaseLearnerExperiment]:
@@ -526,7 +530,7 @@ def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataMod
  
     if config.get("warm_start_from"):
         learner_config["warm_start_from"] = config["warm_start_from"]
-        
+
     mlflow_cfg = config["mlflow"]
     # Priorité : env var (set par submit_cloud) > CLI > config YAML > default
     tracking_uri = (
