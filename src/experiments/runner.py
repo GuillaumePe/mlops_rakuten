@@ -333,6 +333,9 @@ def build_m2_experiment(config: dict) -> tuple[RakutenLightningDataModule, Sklea
         run_name=config["mlflow"]["run_name"],
         tags=combined_tags,
     )
+    if config.get("warm_start_from"):
+        combined_tags["_warm_start_from"] = config["warm_start_from"]
+
     return dm, experiment
 
 def build_m2_baseline_experiment(config: dict) -> tuple[RakutenLightningDataModule, SklearnExperiment]:
@@ -385,6 +388,8 @@ def build_m2_baseline_experiment(config: dict) -> tuple[RakutenLightningDataModu
         run_name=config["mlflow"]["run_name"],
         tags=combined_tags,
     )
+    if config.get("warm_start_from"):
+        combined_tags["_warm_start_from"] = config["warm_start_from"]
     return dm, experiment
 
 def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataModule, SklearnExperiment]:
@@ -477,6 +482,8 @@ def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataMod
         run_name=config["mlflow"]["run_name"],
         tags=combined_tags,
     )
+    if config.get("warm_start_from"):
+        combined_tags["_warm_start_from"] = config["warm_start_from"]
     return dm, experiment
 
 def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataModule, BaseLearnerExperiment]:
@@ -517,6 +524,9 @@ def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataMod
     learner_name = learner_cfg["name"]
     learner_config = learner_cfg.get("config", {})
  
+    if config.get("warm_start_from"):
+        learner_config["warm_start_from"] = config["warm_start_from"]
+        
     mlflow_cfg = config["mlflow"]
     # Priorité : env var (set par submit_cloud) > CLI > config YAML > default
     tracking_uri = (
@@ -1224,6 +1234,11 @@ def main():
         help="(rebase_val_selection / reevaluate_actives) Version du val_selection (1, 2, 3, ...)",
     )
 
+    parser.add_argument(
+        "--warm-start-from", default=None,
+        help="(stateful) Model URI MLflow pour warm-start",
+    )
+
     args = parser.parse_args()
 
     # Charger la config
@@ -1233,7 +1248,9 @@ def main():
     if args.overrides:
         apply_overrides(config, args.overrides)
     print(f"[Runner] Config chargée : {args.experiment} (limit={args.limit})")
-
+    if getattr(args, "warm_start_from", None):
+        config["warm_start_from"] = args.warm_start_from
+        print(f"[Runner] warm-start-from : {args.warm_start_from}")
 
     # MLflow tracking URI : CLI > config > défaut
     tracking_uri = (

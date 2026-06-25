@@ -164,7 +164,18 @@ class LightningExperiment:
             # 1. Log config + tags                                         #
             # ========================================================== #
             self._log_config_and_tags()
- 
+            
+            # 1b. Warm-start stateful (T.1)
+            warm_start_uri = self.config.get("warm_start_from")
+            if warm_start_uri:
+                from src.models.warm_start import apply_warm_start
+                ws_stats = apply_warm_start(self.model, warm_start_uri)
+                mlflow.set_tag("retrain_strategy", "stateful")
+                mlflow.set_tag("warm_start_from", warm_start_uri)
+                mlflow.log_params({f"warm_start/{k}": v for k, v in ws_stats.items()})
+            else:
+                mlflow.set_tag("retrain_strategy", "stateless")
+                
             # ========================================================== #
             # 2. Trainer.fit                                               #
             # ========================================================== #
