@@ -304,6 +304,8 @@ def build_m2_experiment(config: dict) -> tuple[RakutenLightningDataModule, Sklea
         limit=config.get("limit"),
         train_batches=dm_cfg.get("train_batches", [1, 2, 3]),
         exclude_gold=dm_cfg.get("exclude_gold", True),
+        retrain_strategy=config.get("retrain_strategy", "stateless"),
+        replay_fraction=config.get("replay_fraction", 0.10),
     )
 
     model_cfg = config["model"]
@@ -360,6 +362,8 @@ def build_m2_baseline_experiment(config: dict) -> tuple[RakutenLightningDataModu
         limit=config.get("limit"),
         train_batches=dm_cfg.get("train_batches", [1]),
         exclude_gold=dm_cfg.get("exclude_gold", True),
+        retrain_strategy=config.get("retrain_strategy", "stateless"),
+        replay_fraction=config.get("replay_fraction", 0.10),
     )
 
     model_cfg = config["model"]
@@ -449,6 +453,8 @@ def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataMod
         train_batches=dm_cfg.get("train_batches", [1]),
         exclude_gold=dm_cfg.get("exclude_gold", True),
         extra_embedding_caches=dm_cfg.get("extra_embedding_caches", []),
+        retrain_strategy=config.get("retrain_strategy", "stateless"),
+        replay_fraction=config.get("replay_fraction", 0.10),
     )
  
     model_cfg = config["model"]
@@ -478,6 +484,7 @@ def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataMod
         "base_image": bl_cfg["image"]["name"],
         "registry_model_name": promotion_cfg.get("registry_model_name", "rakuten-m2-assembled"),
         "promotion_epsilon": str(promotion_cfg.get("epsilon", 0.005)),
+        "promotion_enabled": str(promotion_cfg.get("enabled", True)),
     }
  
     if config.get("warm_start_from"):
@@ -521,6 +528,8 @@ def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataMod
         limit=config.get("limit"),
         train_batches=dm_cfg.get("train_batches", [1]),
         exclude_gold=dm_cfg.get("exclude_gold", True),
+        retrain_strategy=config.get("retrain_strategy", "stateless"),
+        replay_fraction=config.get("replay_fraction", 0.10),
     )
     print("[DEBUG] DataModule instantiated")
     learner_cfg = config["learner"]
@@ -602,6 +611,8 @@ def build_m3_experiment(config: dict) -> tuple:
         limit=config.get("limit"),
         train_batches=dm_cfg.get("train_batches", [1]),
         exclude_gold=dm_cfg.get("exclude_gold", True),
+        retrain_strategy=config.get("retrain_strategy", "stateless"),
+        replay_fraction=config.get("replay_fraction", 0.10),
     )
     # Configure le preprocessing M3 (stocke tokenizer + transform,
     # pas besoin de setup() pour ça)
@@ -676,6 +687,8 @@ def build_m3_hpo_experiment(config: dict) -> tuple:
         limit=config.get("limit"),
         train_batches=dm_cfg.get("train_batches", [1]),
         exclude_gold=dm_cfg.get("exclude_gold", True),
+        retrain_strategy=config.get("retrain_strategy", "stateless"),
+        replay_fraction=config.get("replay_fraction", 0.10),
     )
     dm.set_m3_preprocessing(
         tokenizer=text_encoder.tokenizer,
@@ -750,6 +763,8 @@ def build_m3_2_experiment(config: dict) -> tuple:
         limit=config.get("limit"),
         train_batches=dm_cfg.get("train_batches", [1]),
         exclude_gold=dm_cfg.get("exclude_gold", True),
+        retrain_strategy=config.get("retrain_strategy", "stateless"),
+        replay_fraction=config.get("replay_fraction", 0.10),
     )
     dm.set_m3_preprocessing(
         tokenizer=text_encoder.tokenizer,
@@ -997,6 +1012,8 @@ def cmd_submit_cloud(args, config: dict):
         pod_command += ["--limit", str(args.limit)]
     if getattr(args, "overrides", None):
         pod_command += ["--set", *args.overrides]
+    if getattr(args, "warm_start_from", None):
+        pod_command += ["--warm-start-from", args.warm_start_from]
     
     # Résolution MLflow tracking URI :
     # - Si fourni explicitement (CLI ou env) ET hors localhost : on garde tel quel
@@ -1167,7 +1184,7 @@ def main():
     )
     parser.add_argument(
         "--action", required=True,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner","fit_lightning", "submit_cloud", "smoke_tailscale","fetch_logs","hpo_lightning","complete_cache","predict_pending","ingest_batch","rebase_val_selection","reevaluate_actives"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner","fit_lightning", "submit_cloud", "smoke_tailscale","fetch_logs","hpo_lightning","complete_cache","predict_pending","ingest_batch","rebase_val_selection","reevaluate_actives","eval_gold_champion"],
         help="Action à exécuter",
     )
     parser.add_argument(
@@ -1182,7 +1199,7 @@ def main():
     parser.add_argument(
         "--cloud-action",
         default=None,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner","fit_lightning","hpo_lightning","complete_cache","predict_pending","reevaluate_actives"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner","fit_lightning","hpo_lightning","complete_cache","predict_pending","reevaluate_actives","eval_gold_champion"],
         help="(submit_cloud only) Quelle action le pod cloud doit exécuter",
     )
     parser.add_argument(
@@ -1307,6 +1324,16 @@ def main():
         from src.data.reevaluate_actives import run_reevaluate_actives
         result = run_reevaluate_actives(version=int(version))
         print(f"[Runner] reevaluate_actives result: {result}")
+        return
+    if args.action == "eval_gold_champion":
+        from src.models.eval_gold_champion import run_eval_gold_champion
+        result = run_eval_gold_champion(
+            model_name=config.get("promotion", {}).get("registry_model_name"),
+            batch_id=(args.batch if args.batch is not None else config.get("batch_id")),
+            tracking_uri=tracking_uri,
+            experiment_name=config.get("mlflow", {}).get("experiment_name", args.experiment),
+        )
+        print(f"[Runner] eval_gold_champion result: {result}")
         return
 
     # Init MLflow seulement pour les actions qui en ont besoin

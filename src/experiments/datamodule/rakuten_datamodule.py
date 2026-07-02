@@ -85,6 +85,8 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         train_batches: list[int] = (1, 2, 3),
         exclude_gold: bool = True,
         extra_embedding_caches: list[str] | None = None,
+        retrain_strategy: str = "stateless",  # T.2 — "stateless" | "stateful"
+        replay_fraction: float = 0.10
     ):
         super().__init__()
         self.mode = mode
@@ -103,6 +105,8 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         self.train_batches = list(train_batches)
         self.exclude_gold = exclude_gold
         self.extra_embedding_caches = list(extra_embedding_caches or [])
+        self.retrain_strategy = retrain_strategy
+        self.replay_fraction = replay_fraction
 
         # Chemin du cache, déterministe à partir des modèles + version
         # (n'existe pas pour raw_for_finetune)
@@ -410,6 +414,9 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         # train_pool_effective : pool - val_selection
         mask_pool_effective = mask_pool & (~pl.col("productid").is_in(val_sel_productids))
         self._df_train_pool_effective = self._df_full.filter(mask_pool_effective)
+
+        # T.2 — replay buffer (stateful) ou pass-through (stateless)
+        self._df_train_pool_effective = self._apply_retrain_strategy(self._df_train_pool_effective)
     
         # 6. Split train/val standard 80/20 sur train_pool_effective
         n_pool_eff = len(self._df_train_pool_effective)
@@ -460,6 +467,75 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         )
         return {d["productid"]: bool(d.get(val_sel_col, False)) for d in docs}
 
+    @staticmethod
+    def _stratified_sample(df: pl.DataFrame, fraction: float, seed: int = 42) -> pl.DataFrame:
+        """Échantillon stratifié par 'label' : préserve P(y) du pool source.
+
+        partition_by + sample par classe → robuste aux classes rares (une classe à 1
+        sample tire 0 ou 1, sans exception ; train_test_split stratifié lèverait sur
+        'least populated class').
+        """
+        if fraction >= 1.0 or df.is_empty():
+            return df
+        parts = df.partition_by("label")
+        sampled = [p.sample(fraction=fraction, seed=seed) for p in parts]
+        return pl.concat(sampled, how="vertical")
+    
+    def retrain_params(self) -> dict:
+        """Dict prêt pour mlflow.log_params() — résume la stratégie T.2."""
+        d = {
+            "retrain/strategy": self.retrain_strategy,
+            "retrain/replay_fraction": self.replay_fraction,
+            "retrain/train_batches": str(self.train_batches),
+        }
+        if hasattr(self, "_replay_n_new"):
+            d["retrain/n_new"] = self._replay_n_new
+            d["retrain/n_old_replay"] = self._replay_n_old
+            d["retrain/n_old_pool"] = self._replay_n_old_pool
+        return d
+
+
+    def _apply_retrain_strategy(self, df_pool_eff: pl.DataFrame) -> pl.DataFrame:
+        """T.2 — Stratégie de données sur le train_pool_effective.
+
+        stateless : pass-through (union batch_1..n).
+        stateful  : batch n=max(train_batches) entier + replay_fraction x strat(batch_1..n-1).
+                    Mélange P_mix = (n_new*P_new + f*n_old*P_old)/(n_new + f*n_old) ;
+                    f regle stabilite/plasticite ; stratifie => P(y) preserve.
+
+        INVARIANT : ne touche QUE train_pool_effective. val_selection et gold figes.
+        """
+        if self.retrain_strategy != "stateful":
+            return df_pool_eff
+
+        n_max = max(self.train_batches)
+        old_batches = [b for b in self.train_batches if b < n_max]
+
+        if not old_batches:
+            logger.info(
+                "[DataModule] retrain_strategy=stateful mais un seul batch "
+                f"(n={n_max}) -> pas de replay possible, equivaut a stateless."
+            )
+            return df_pool_eff
+
+        df_new = df_pool_eff.filter(pl.col("batch_id") == n_max)
+        df_old = df_pool_eff.filter(pl.col("batch_id").is_in(old_batches))
+        df_old_replay = self._stratified_sample(
+            df_old, self.replay_fraction, seed=self.random_state
+        )
+        df_mix = pl.concat([df_new, df_old_replay], how="vertical")
+        
+        # T.2b — expose pour retrain_params() → MLflow
+        self._replay_n_new = len(df_new)
+        self._replay_n_old = len(df_old_replay)
+        self._replay_n_old_pool = len(df_old)
+
+        logger.info(
+            f"[DataModule] retrain_strategy=stateful | n={n_max} | "
+            f"new={len(df_new)} | old_pool={len(df_old)} | "
+            f"replay(f={self.replay_fraction})={len(df_old_replay)} | mix={len(df_mix)}"
+        )
+        return df_mix
 
     def setup(self, stage: str | None = None):
         """
@@ -658,6 +734,9 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         # train_pool moins val_selection.
         mask_pool_effective = mask_pool & (~pl.col(val_sel_col).cast(pl.Boolean))
         self._df_train_pool_effective = df.filter(mask_pool_effective)
+
+        # T.2 — replay buffer (stateful) ou pass-through (stateless)
+        self._df_train_pool_effective = self._apply_retrain_strategy(self._df_train_pool_effective)
 
         n_total = df.height
         n_pool = self._df_train_pool.height

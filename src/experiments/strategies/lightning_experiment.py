@@ -123,6 +123,7 @@ class LightningExperiment:
             "registry_model_name", "rakuten-m3-attention-fusion"
         )
         self.promotion_threshold = promotion_cfg.get("threshold", 0.005)
+        self.promotion_enabled = promotion_cfg.get("enabled", True)
  
         self.n_classes = config.get("model", {}).get("n_classes", 27)
  
@@ -164,6 +165,9 @@ class LightningExperiment:
             # 1. Log config + tags                                         #
             # ========================================================== #
             self._log_config_and_tags()
+
+            # T.2b — log retrain strategy params
+            mlflow.log_params(self.dm.retrain_params())
             
             # 1b. Warm-start stateful (T.1)
             warm_start_uri = self.config.get("warm_start_from")
@@ -429,22 +433,29 @@ class LightningExperiment:
         latest_version = max(int(v.version) for v in versions)
  
         # Décision de promotion
-        should_promote = True  # défaut si pas de @champion existant
-        try:
-            champion = client.get_model_version_by_alias(
-                self.registry_model_name, "champion"
-            )
-            champion_run = client.get_run(champion.run_id)
-            f1_champion = champion_run.data.metrics.get(
-                "eval_gold/f1_weighted", 0.0
-            )
-            should_promote = (f1_gold - f1_champion) > self.promotion_threshold
+        if not self.promotion_enabled:
+            should_promote = False
             logger.info(
-                f"  F1 gold: {f1_gold:.4f} vs champion: {f1_champion:.4f} "
-                f"(Δ={f1_gold - f1_champion:.4f}, threshold={self.promotion_threshold})"
+                "  promotion.enabled=false → modèle ENREGISTRÉ mais NON promu "
+                "(décision déléguée à compare_and_promote)"
             )
-        except Exception:
-            logger.info("  Pas de @champion existant → promotion automatique")
+        else:
+            should_promote = True  # défaut si pas de @champion existant
+            try:
+                champion = client.get_model_version_by_alias(
+                    self.registry_model_name, "champion"
+                )
+                champion_run = client.get_run(champion.run_id)
+                f1_champion = champion_run.data.metrics.get(
+                    "eval_gold/f1_weighted", 0.0
+                )
+                should_promote = (f1_gold - f1_champion) > self.promotion_threshold
+                logger.info(
+                    f"  F1 gold: {f1_gold:.4f} vs champion: {f1_champion:.4f} "
+                    f"(Δ={f1_gold - f1_champion:.4f}, threshold={self.promotion_threshold})"
+                )
+            except Exception:
+                logger.info("  Pas de @champion existant → promotion automatique")
  
         mlflow.log_param("promote_to_champion", should_promote)
  

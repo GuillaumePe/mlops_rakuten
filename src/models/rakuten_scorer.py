@@ -51,6 +51,11 @@ import torch
 import torch.nn.functional as F
 from mlflow.tracking import MlflowClient
 from src.models.utils import ensure_device
+from torch.utils.data import DataLoader
+from src.experiments.datamodule.datasets import MultimodalDataset
+from src.features.utils import clean_description
+from src.experiments.datamodule.tabular_features import extract_text_tabular, extract_image_tabular, TEXT_TABULAR_COLS, IMAGE_TABULAR_COLS
+
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +84,7 @@ def _prepare_text_column(raw_df: pl.DataFrame) -> pl.DataFrame:
 
     Garantit la symétrie train/predict (même preprocessing textuel).
     """
-    from src.features.utils import clean_description
+
 
     designation = raw_df["designation"].to_list()
     description = (
@@ -182,11 +187,8 @@ class RakutenScorer:
         )
 
         # 2. Récupérer les tags (version tags > run tags en fallback)
-        version_tags = {
-            t.key: t.value
-            for t in client.get_model_version(model_name, version).tags
-            if t.value  # exclure les tags vides (MLflow API legacy)
-        } if hasattr(version_info, "tags") else {}
+        _mv_tags = client.get_model_version(model_name, version).tags or {}
+        version_tags = {k: v for k, v in _mv_tags.items() if v}
 
         run_tags = client.get_run(run_id).data.tags
         meta = {**run_tags, **version_tags}  # version tags priment
@@ -448,12 +450,7 @@ class _ScorerM2:
         Réutilise les fonctions du DataModule pour garantir les mêmes noms
         de colonnes (tab_text_length, tab_image_width, etc.).
         """
-        from src.experiments.datamodule.tabular_features import (
-            extract_text_tabular,
-            extract_image_tabular,
-            TEXT_TABULAR_COLS,
-            IMAGE_TABULAR_COLS,
-        )
+
 
         text_records = []
         image_records = []
@@ -620,78 +617,57 @@ class _ScorerM3:
         ensure_device(learner)
         return learner
 
-    def predict(self, raw_df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    def predict(
+        self, raw_df: pl.DataFrame, batch_size: int = 64, num_workers: int = 2
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Score un batch de samples bruts via le modèle assemblé M3/M3.2.
 
-        Preprocessing (tokenize + transform) → forward encoders → fusion → logits.
+        Mini-batché via MultimodalDataset + DataLoader (le MÊME Dataset que le
+        DataModule à l'entraînement → symétrie train/inférence, zéro duplication
+        de tokenize/transform). Empreinte mémoire O(batch_size · L²), constante
+        en n → robuste à la croissance du gold set.
         """
-        from PIL import Image
 
         # 0. Préparer la colonne `text` (concaténation + clean_description)
         raw_df = _prepare_text_column(raw_df)
 
-        batch_size = len(raw_df)
-        all_input_ids = []
-        all_attention_masks = []
-        all_images = []
+        texts = raw_df["text"].to_list()
+        image_paths = raw_df["image_path"].to_list()
 
-        for row in raw_df.iter_rows(named=True):
-            # Texte nettoyé → tokenize
-            text = row["text"]
+        dataset = MultimodalDataset(
+            texts=texts,
+            image_paths=image_paths,
+            labels=None,  # inférence
+            tokenizer=self._tokenizer,
+            max_len=self._max_len,
+            image_transform=self._image_transform,
+        )
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,          # ordre préservé → alignement predictions↔raw_df
+            num_workers=num_workers,
+            pin_memory=(self._device.type == "cuda"),
+        )
 
-            tokens = self._tokenizer(
-                text,
-                max_length=self._max_len,
-                padding="max_length",
-                truncation=True,
-                return_tensors="pt",
-            )
-            all_input_ids.append(tokens["input_ids"].squeeze(0))
-            all_attention_masks.append(tokens["attention_mask"].squeeze(0))
-
-            # Image → transform
-            image_path = row.get("image_path", "")
-            try:
-                img = Image.open(image_path).convert("RGB")
-                img_tensor = self._image_transform(img)
-            except Exception as e:
-                logger.warning(
-                    f"[_ScorerM3] Image illisible {image_path} : {e}. "
-                    f"Fallback tensor noir."
-                )
-                # Fallback : tensor noir de la bonne taille (3, 224, 224)
-                img_tensor = torch.zeros(3, 224, 224)
-
-            all_images.append(img_tensor)
-
-        # Empiler en batch
-        batch = {
-            "input_ids": torch.stack(all_input_ids).to(self._device),
-            "attention_mask": torch.stack(all_attention_masks).to(self._device),
-            "image": torch.stack(all_images).to(self._device),
-        }
-
-        # Forward
+        all_probas = []
         with torch.no_grad():
-            # 1. Encodeurs frozen → token embeddings + spatial feature map
-            #    _token_level_features → (B, seq_len, d_text), (B, seq_len)
-            #    _spatial_feature_map  → (B, n_patches, d_image)
-            #    NB : on appelle les méthodes internes, PAS forward() qui
-            #    retourne les logits du base learner (pas ce qu'on veut).
-            text_tokens, text_mask = self._text_learner.net._token_level_features(
-                batch["input_ids"], batch["attention_mask"]
-            )
-            image_patches = self._image_learner.net._spatial_feature_map(
-                batch["image"]
-            )
+            for batch in loader:
+                input_ids = batch["input_ids"].to(self._device, non_blocking=True)
+                attention_mask = batch["attention_mask"].to(self._device, non_blocking=True)
+                images = batch["image"].to(self._device, non_blocking=True)
 
-            # 2. Fusion module → logits (B, n_classes)
-            #    AttentionFusionModule.forward(text_tokens, text_mask, image_patches)
-            #    AttentionFusionModuleV2.forward(..., tabular=None)  [M3.2]
-            logits = self._fusion_module(text_tokens, text_mask, image_patches)
+                # Encodeurs frozen → token embeddings + spatial feature map
+                text_tokens, text_mask = self._text_learner.net._token_level_features(
+                    input_ids, attention_mask
+                )
+                image_patches = self._image_learner.net._spatial_feature_map(images)
 
-        probas = F.softmax(logits, dim=-1).cpu().numpy().astype(np.float32)
-        preds = logits.argmax(dim=-1).cpu().numpy().astype(np.int64)
+                # Fusion → logits (B, n_classes)
+                logits = self._fusion_module(text_tokens, text_mask, image_patches)
+                all_probas.append(F.softmax(logits, dim=-1).cpu())
 
+        probas = torch.cat(all_probas, dim=0).numpy().astype(np.float32)
+        preds = probas.argmax(axis=-1).astype(np.int64)
         return preds, probas

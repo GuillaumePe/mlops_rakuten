@@ -109,6 +109,7 @@ class HPOLightningExperiment:
         )
         self.promotion_threshold = promotion_cfg.get("threshold", 0.005)
         self.n_classes = self.model_cfg.get("n_classes", 27)
+        self.promotion_enabled = promotion_cfg.get("enabled", True)
 
     # ================================================================== #
     # FIT — séquence complète                                              #
@@ -147,6 +148,8 @@ class HPOLightningExperiment:
             mlflow.log_param("hpo/study_name", self.study_name)
             for k, v in self.search_space.items():
                 mlflow.log_param(f"hpo/space/{k}", str(v))
+            # T.2b — log retrain strategy params
+            mlflow.log_params(self.dm.retrain_params())
 
             def objective(trial: optuna.Trial) -> float:
                 hp = _suggest_hp_from_yaml(trial, self.search_space)
@@ -436,23 +439,29 @@ class HPOLightningExperiment:
         )
         latest_version = max(int(v.version) for v in versions)
 
-        should_promote = True
-        try:
-            champion = client.get_model_version_by_alias(
-                self.registry_model_name, "champion"
-            )
-            champion_run = client.get_run(champion.run_id)
-            f1_champion = champion_run.data.metrics.get(
-                "eval_gold/f1_weighted", 0.0
-            )
-            should_promote = (f1_gold - f1_champion) > self.promotion_threshold
+        if not self.promotion_enabled:
+            should_promote = False
             logger.info(
-                f"  F1 gold: {f1_gold:.4f} vs champion: {f1_champion:.4f} "
-                f"(delta={f1_gold - f1_champion:.4f})"
+                "  promotion.enabled=false → modèle ENREGISTRÉ mais NON promu "
+                "(décision déléguée à compare_and_promote)"
             )
-        except Exception:
-            logger.info("  Pas de @champion → promotion automatique")
-
+        else:
+            should_promote = True
+            try:
+                champion = client.get_model_version_by_alias(
+                    self.registry_model_name, "champion"
+                )
+                champion_run = client.get_run(champion.run_id)
+                f1_champion = champion_run.data.metrics.get(
+                    "eval_gold/f1_weighted", 0.0
+                )
+                should_promote = (f1_gold - f1_champion) > self.promotion_threshold
+                logger.info(
+                    f"  F1 gold: {f1_gold:.4f} vs champion: {f1_champion:.4f} "
+                    f"(delta={f1_gold - f1_champion:.4f})"
+                )
+            except Exception:
+                logger.info("  Pas de @champion → promotion automatique")
         mlflow.log_param("promote_to_champion", should_promote)
 
         tags = self.config.get("mlflow", {}).get("tags", {})

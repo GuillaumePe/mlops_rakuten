@@ -288,10 +288,13 @@ class BaseLearnerExperiment:
             self._run_id = run.info.run_id
             logger.info(f"  MLflow run_id={self._run_id}")
 
-            # Log config en MLflow
+           # Log config en MLflow
             mlflow.log_params(self.config)
             mlflow.set_tag("learner_name", self.learner_name)
             mlflow.set_tag("modality", self._learner.modality)
+
+            # T.2b — log retrain strategy params
+            mlflow.log_params(datamodule.retrain_params())
 
             # Fit
             fit_start = time.time()

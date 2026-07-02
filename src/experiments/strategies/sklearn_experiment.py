@@ -69,6 +69,9 @@ class SklearnExperiment:
             print(f"[SklearnExperiment] MLflow run started: {run.info.run_id}")
             if self.tags:
                 mlflow.set_tags(self.tags)
+                
+            # T.2b — log retrain strategy params
+            mlflow.log_params(datamodule.retrain_params())
 
             # 1. Récupérer les données
             # include_raw : True si le modèle a besoin des colonnes brutes
@@ -188,19 +191,29 @@ class SklearnExperiment:
                 )
             else:
                 candidate_version = versions[0].version
-                from src.models.utils import evaluate_promotion_via_logged_metrics
-                epsilon = float(self.tags.get("promotion_epsilon", 0.005))
-                result = evaluate_promotion_via_logged_metrics(
-                    model_name=model_name,
-                    candidate_version=candidate_version,
-                    metric_key="eval_gold/f1_weighted",
-                    epsilon=epsilon,
-                )
-                print(result)
-                mlflow.set_tag("promotion_promoted", str(result.promoted).lower())
-                mlflow.set_tag("promotion_reason", result.reason)
-                if result.gain is not None:
-                    mlflow.log_metric("promotion_gain_f1", result.gain)
+                promotion_enabled = self.tags.get("promotion_enabled", "true").lower() == "true"
+                if not promotion_enabled:
+                    print(
+                        "[SklearnExperiment] promotion_enabled=false → modèle ENREGISTRÉ "
+                        f"(v{candidate_version}) mais NON promu "
+                        "(décision déléguée à compare_and_promote)"
+                    )
+                    mlflow.set_tag("promotion_promoted", "false")
+                    mlflow.set_tag("promotion_reason", "deferred_to_compare_and_promote")
+                else:
+                    from src.models.utils import evaluate_promotion_via_logged_metrics
+                    epsilon = float(self.tags.get("promotion_epsilon", 0.005))
+                    result = evaluate_promotion_via_logged_metrics(
+                        model_name=model_name,
+                        candidate_version=candidate_version,
+                        metric_key="eval_gold/f1_weighted",
+                        epsilon=epsilon,
+                    )
+                    print(result)
+                    mlflow.set_tag("promotion_promoted", str(result.promoted).lower())
+                    mlflow.set_tag("promotion_reason", result.reason)
+                    if result.gain is not None:
+                        mlflow.log_metric("promotion_gain_f1", result.gain)
 
         return self
 
