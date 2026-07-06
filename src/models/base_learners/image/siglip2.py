@@ -478,6 +478,15 @@ class Siglip2(BaseLearner):
 
         self.net = self._build_net()
 
+        # T.1 — Warm-start stateful (no-op si aucun état posé = stateless).
+        # SigLIP2 (tour vision) : espace pixel stationnaire, preprocessing figé →
+        # tous les tenseurs matchent par nom+shape (n_classes=27 fixe),
+        # mismatched==0, que le modèle soit frozen ou LoRA. Transfert utile = la
+        # head (frozen) ou les clés LoRA + head (lora_enabled=True) ; le backbone
+        # SigLIP2 gelé, identique d'un batch à l'autre, est copié sans effet.
+        # L'état de l'optimiseur n'est PAS transféré (moments Adam froids).
+        self.apply_warm_start_state()
+
         n_trainable = sum(p.numel() for p in self.net.parameters() if p.requires_grad)
         n_total = sum(p.numel() for p in self.net.parameters())
         print(

@@ -488,6 +488,21 @@ class TextCNN(BaseLearner):
             lr=self._lr,
             weight_decay=self._weight_decay,
         )
+        # T.1 — TextCNN est stateless-only PAR CONCEPTION (warm-start neutralisé).
+        # Le vocab est reconstruit à chaque batch via _build_vocab(corpus_courant),
+        # donc l'Embedding est NON-STATIONNAIRE : la ligne i de la table ne
+        # référence pas le même token d'un batch à l'autre (mapping token→id
+        # trié par fréquence sur un corpus qui change). Injecter les poids d'un
+        # @active reviendrait à charger un prior mal-aligné (bruit), pas un
+        # warm-start — et le filtre par shape ne protège pas du cas V_n == V_{n-1}
+        # (tailles égales mais mapping différent). On neutralise donc tout état
+        # de warm-start que l'orchestrateur aurait pu poser.
+        if getattr(self, "_warm_start_net_state", None) is not None:
+            print(
+                "[TextCNN] warm-start ignoré : stateless-only "
+                "(vocab non-stationnaire, Embedding non-transférable)."
+            )
+            self._warm_start_net_state = None
 
         # Trainer
         callbacks = [

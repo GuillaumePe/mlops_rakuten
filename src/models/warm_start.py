@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 
 import torch
-
+import mlflow.pyfunc
 logger = logging.getLogger(__name__)
 
 
@@ -163,21 +163,24 @@ def _warm_start_lightning(model, warm_start_uri: str) -> dict:
 
 def _warm_start_base_learner(learner, warm_start_uri: str) -> dict:
     """
-    Charge un BaseLearner @active et injecte ses poids dans le learner cible.
+    Charge un BaseLearner source et STOCKE son state_dict sur le learner
+    cible. L'injection réelle est DIFFÉRÉE à learner.fit().
 
-    Le @active a été entraîné sur batch_n-1. Le learner cible est une
-    instance fraîche (même architecture, même backbone). On injecte
-    TOUS les poids du .net (backbone + head) pour partir de l'état
-    entraîné au lieu de l'init aléatoire.
+    Raison : le .net d'un base learner fraîchement construit par
+    _build_learner() vaut None (il est bâti paresseusement DANS fit()).
+    On ne peut donc pas charger les poids ici. On mémorise l'état source
+    (déplacé sur CPU pour ne pas retenir de VRAM) dans
+    learner._warm_start_net_state, et fit() le consomme via
+    self.apply_warm_start_state() juste après avoir bâti self.net.
 
-    Pour les learners avec LoRA (CamemBERT-LoRA), les poids LoRA
-    entraînés remplacent l'init aléatoire fraîche.
+    Contrat : sans appel à apply_warm_start_state() dans fit(), le
+    warm-start est un no-op silencieux.
     """
-    import mlflow.pyfunc
+    
 
     logger.info(f"[warm-start/base_learner] Chargement {warm_start_uri}...")
 
-    # 1. Charger le pyfunc et extraire le learner
+    # 1. Charger le pyfunc et extraire le learner source
     pyfunc = mlflow.pyfunc.load_model(warm_start_uri)
     python_model = getattr(
         getattr(pyfunc, "_model_impl", None), "python_model", None
@@ -188,41 +191,32 @@ def _warm_start_base_learner(learner, warm_start_uri: str) -> dict:
     source_learner = getattr(python_model, "learner", None)
     if source_learner is None:
         raise RuntimeError(f"learner est None pour {warm_start_uri}")
+    if getattr(source_learner, "net", None) is None:
+        raise RuntimeError(
+            f"source_learner.net est None pour {warm_start_uri} "
+            f"(modèle source non-fitté ?)"
+        )
 
-    # 2. State dict du net source
-    source_state = source_learner.net.state_dict()
-    target_state = learner.net.state_dict()
+    # 2. Extraire le state_dict source sur CPU, puis libérer la source (VRAM)
+    source_state = {
+        k: v.detach().cpu()
+        for k, v in source_learner.net.state_dict().items()
+    }
+    learner._warm_start_net_state = source_state
 
-    # 3. Filtrer aux clés communes + même shape
-    filtered = {}
-    mismatched = []
-    for key in target_state:
-        if key in source_state:
-            if source_state[key].shape == target_state[key].shape:
-                filtered[key] = source_state[key]
-            else:
-                mismatched.append(key)
-
-    # 4. Injecter
-    if filtered:
-        learner.net.load_state_dict(filtered, strict=False)
-
-    # 5. Cleanup
     del pyfunc, python_model, source_learner
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     stats = {
         "type": "base_learner",
-        "loaded": len(filtered),
-        "total_target": len(target_state),
+        "deferred": True,
         "total_source": len(source_state),
-        "shape_mismatched": len(mismatched),
     }
     logger.info(
-        f"[warm-start/base_learner] {stats['loaded']}/{stats['total_target']} "
-        f"poids chargés depuis {warm_start_uri}"
+        f"[warm-start/base_learner] {stats['total_source']} clés source "
+        f"stockées ; injection différée à fit() (apply_warm_start_state)"
     )
-    if mismatched:
-        logger.warning(f"[warm-start/base_learner] Shape mismatch : {mismatched}")
     return stats
 
 

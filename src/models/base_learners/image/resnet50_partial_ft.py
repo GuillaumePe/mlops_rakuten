@@ -495,7 +495,16 @@ class ResNet50PartialFT(BaseLearner):
             lr_backbone=self._lr_backbone,
             weight_decay=self._weight_decay,
         )
-
+        # T.1 — Warm-start stateful (no-op si aucun état posé = stateless).
+        # ResNet50 partial FT : espace pixel stationnaire, pas de vocab →
+        # tous les tenseurs matchent par nom+shape (n_classes=27 fixe),
+        # mismatched==0. state_dict() sauve TOUS les poids (gelés inclus) :
+        # les couches gelées = poids ImageNet identiques d'un batch à l'autre,
+        # copie inoffensive ; le transfert utile porte sur la queue dégelée du
+        # backbone + la head (fine-tuning du batch n-1). L'état de l'optimiseur
+        # n'est PAS transféré (moments Adam repartent froids).
+        self.apply_warm_start_state()
+        
         # Trainer
         callbacks = [
             EarlyStopping(

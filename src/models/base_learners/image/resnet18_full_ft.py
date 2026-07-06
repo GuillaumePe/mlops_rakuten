@@ -534,6 +534,16 @@ class ResNet18FullFT(BaseLearner):
             weight_decay=self._weight_decay,
         )
 
+        # T.1 — Warm-start stateful (no-op si aucun état posé = stateless).
+        # ResNet18 full FT : espace pixel stationnaire, pas de vocab/tokenizer →
+        # tous les tenseurs du net (backbone + head + buffers BN) matchent par
+        # nom et shape (n_classes=27 fixe). Injection full-net : l'état @active
+        # du batch n-1 remplace l'init ImageNet. Poids ET buffers BN sont
+        # transférés ; l'état de l'optimiseur (moments Adam) ne l'est PAS et
+        # repart froid — sans risque ici, lr_backbone≈1e-5 ne perturbe pas le
+        # backbone entraîné, et la bias-correction d'Adam absorbe le cold start.
+        self.apply_warm_start_state()
+
         # Trainer
         callbacks = [
             EarlyStopping(

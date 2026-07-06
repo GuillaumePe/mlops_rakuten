@@ -280,5 +280,57 @@ class BaseLearner(ABC):
     # Utilitaires                                                         #
     # ------------------------------------------------------------------ #
 
+    def apply_warm_start_state(self) -> dict:
+        """
+        Injecte les poids de warm-start stockés dans self.net (T.1 stateful).
+
+        À appeler dans fit(), JUSTE APRÈS la construction de self.net et
+        AVANT la boucle d'entraînement. Consomme l'attribut
+        self._warm_start_net_state posé par
+        src.models.warm_start._warm_start_base_learner.
+
+        Sans _warm_start_net_state (cas stateless) → no-op silencieux.
+
+        Filtrage : seules les clés présentes dans self.net ET de même shape
+        sont chargées (strict=False). Les clés absentes ou de shape
+        différente sont ignorées (ex. head redimensionnée). L'état source
+        est libéré après injection.
+        """
+        state = getattr(self, "_warm_start_net_state", None)
+        if state is None:
+            return {"applied": False, "reason": "no_warm_start_state"}
+
+        if getattr(self, "net", None) is None:
+            raise RuntimeError(
+                "apply_warm_start_state() appelé avant construction de "
+                "self.net. L'appel doit suivre la création de self.net "
+                "dans fit()."
+            )
+
+        target_state = self.net.state_dict()
+        filtered = {}
+        mismatched = 0
+        for key, tensor in target_state.items():
+            if key in state:
+                if state[key].shape == tensor.shape:
+                    filtered[key] = state[key]
+                else:
+                    mismatched += 1
+
+        if filtered:
+            self.net.load_state_dict(filtered, strict=False)
+
+        # Libère la source (évite de retenir un double des poids)
+        self._warm_start_net_state = None
+
+        stats = {
+            "applied": True,
+            "loaded": len(filtered),
+            "total_target": len(target_state),
+            "mismatched": mismatched,
+        }
+        self._warm_start_stats = stats
+        return stats
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(modality={self.modality}, embed_dim={self.embed_dim})"

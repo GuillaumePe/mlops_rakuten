@@ -535,6 +535,17 @@ class CamembertLoRA(BaseLearner):
             warmup_ratio=self._warmup_ratio,
         )
 
+        # T.1 — Warm-start stateful (no-op si aucun état posé = stateless).
+        # Cas LoRA = le plus propre : le backbone CamemBERT gelé est ré-obtenu
+        # identique depuis HF Hub à chaque batch (W0 stationnaire) → sa copie est
+        # un no-op inoffensif. Le signal stateful vit ENTIÈREMENT dans le sous-
+        # espace de rang r (ΔW = (α/r)·BA) + la head : injecter ces clés = warm-
+        # start maximalement efficace (dim. intrinsèque faible, Aghajanyan 2020).
+        # mismatched==0 (même archi) ; l'état optimiseur (AdamW + cosine
+        # scheduler) n'est PAS transféré et repart froid — le warmup linéaire de
+        # configure_optimizers absorbe le cold start.
+        self.apply_warm_start_state()
+
         # Log trainable params (sanity check sur ~2.4M)
         n_trainable = sum(p.numel() for p in self.net.parameters() if p.requires_grad)
         n_total = sum(p.numel() for p in self.net.parameters())
