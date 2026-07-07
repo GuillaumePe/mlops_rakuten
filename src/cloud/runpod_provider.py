@@ -14,7 +14,7 @@ from src.cloud.base import (
     CloudProvider, GPUSpec, JobConfig, JobHandle, JobResult, JobStatus,
 )
 from src.cloud.exceptions import (
-    CloudConfigError, JobFailedError, JobSubmissionError, JobTimeoutError,
+    CloudConfigError, JobFailedError, JobSubmissionError, JobTimeoutError, NoCapacityError,
 )
 
 
@@ -59,6 +59,24 @@ RUNPOD_STATUS_MAP = {
     "TERMINATED": JobStatus.STOPPED,
     "FAILED": JobStatus.FAILED,
 }
+
+# Signatures d'erreur RunPod correspondant à une PÉNURIE de capacité GPU
+# (par opposition à une erreur fatale : creds, image introuvable, config volume).
+# Calibré sur le message réel observé lors d'une saturation rtx_5090 :
+#   "There are no longer any instances available with the requested
+#    specifications. Please refresh and try again."
+# À ENRICHIR au fil des signatures pénurie observées (instrument-before-optimize).
+_RUNPOD_CAPACITY_PATTERNS = (
+    "no longer any instances available",
+    "no instances available",
+)
+
+
+def _is_capacity_error(message: str) -> bool:
+    """True si le message d'erreur RunPod signale une pénurie GPU (retryable)."""
+    low = message.lower()
+    return any(pat in low for pat in _RUNPOD_CAPACITY_PATTERNS)
+
 
 
 class RunPodProvider(CloudProvider):
@@ -110,7 +128,14 @@ class RunPodProvider(CloudProvider):
                 **volume_kwargs,
             )
         except Exception as e:
-            raise JobSubmissionError(f"RunPod create_pod failed: {e}") from e
+            msg = str(e)
+            if _is_capacity_error(msg):
+                # Pénurie transitoire → RETRYABLE (attendre qu'un GPU se libère)
+                raise NoCapacityError(
+                    f"RunPod pénurie GPU ({config.gpu.gpu_type}): {msg}"
+                ) from e
+            # Tout le reste (creds, image, API) → FAIL-FAST déterministe
+            raise JobSubmissionError(f"RunPod create_pod failed: {msg}") from e
 
         if not pod or "id" not in pod:
             raise JobSubmissionError(f"RunPod retour invalide: {pod}")
