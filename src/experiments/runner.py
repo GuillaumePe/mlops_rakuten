@@ -41,7 +41,11 @@ from src.models.base_learners._pyfunc_wrapper import BaseLearnerPyfunc
 from torch.utils.data import DataLoader
 from src.models.assembled.m3_2_coadaptation import M32CoAdaptationFusion
 from src.experiments.strategies.hpo_lightning_experiment import HPOLightningExperiment
-
+import time
+from src.cloud.factory import get_cloud_provider
+from src.cloud.base import JobConfig, GPUSpec, VolumeMount, JobStatus
+from src.cloud.exceptions import JobSubmissionError, NoCapacityError
+from src.cloud.submit import submit_cloud, DEFAULT_GPU_TYPES
 
 # Registre des dimensions d'embeddings par base learner.
 # Utilisé par build_m2_best_experiment pour résoudre embed_dim
@@ -957,224 +961,28 @@ def cmd_complete_cache(dm, experiment):
     print("[complete_cache] ✓ Cache réécrit + push R2")
 
 def cmd_submit_cloud(args, config: dict):
-    """Soumet un job au provider cloud."""
-    import time
-    from src.cloud.factory import get_cloud_provider
-    from src.cloud.base import JobConfig, GPUSpec, VolumeMount, JobStatus
-    from src.cloud.exceptions import JobSubmissionError
+    """
+    Soumet un job au provider cloud.
 
+    Wrapper mince : toute la logique vit désormais dans src.cloud.submit
+    (léger, sans deps ML → exécutable depuis le conteneur Airflow, option B).
+    Le paramètre `config` est conservé pour compat de signature avec main(),
+    mais inutilisé (le pod recharge sa propre config).
+    """
     if args.cloud_action is None:
         raise ValueError("--cloud-action requis pour --action submit_cloud")
-
-    # ── Tailscale : résolution unique ──────────────────────────────
-    ts_ip = get_local_tailscale_ip()
-    tailscale_authkey = os.getenv("TAILSCALE_AUTHKEY", "")
-    if not tailscale_authkey:
-        raise RuntimeError(
-            "TAILSCALE_AUTHKEY manquante dans .env. "
-            "Génère une auth key pod (reusable=true, ephemeral=true) "
-            "dans le dashboard Tailscale."
-        )
-
-    # URIs dérivées pour le pod (tout passe par Tailscale)
-    mlflow_uri_for_pod = f"http://{ts_ip}:5000"
-    mongo_uri_for_pod = f"mongodb://{ts_ip}:27017"
-
-    # Override MLflow si URI explicite non-locale fournie
-    mlflow_uri_override = (
-        args.mlflow_tracking_uri
-        or os.getenv("MLFLOW_TRACKING_URI", "")
+    return submit_cloud(
+        experiment=args.experiment,
+        cloud_action=args.cloud_action,
+        gpu_types=args.gpu_types,
+        cloud_image=args.cloud_image,
+        cloud_timeout=args.cloud_timeout,
+        limit=args.limit,
+        overrides=getattr(args, "overrides", None),
+        warm_start_from=getattr(args, "warm_start_from", None),
+        mlflow_tracking_uri=args.mlflow_tracking_uri,
+        dvc_targets=args.cloud_dvc_targets,
     )
-    local_hosts = ("localhost", "127.0.0.1", "mlflow:5000")
-    if mlflow_uri_override and not any(h in mlflow_uri_override for h in local_hosts):
-        mlflow_uri_for_pod = mlflow_uri_override
-
-    print(f"[submit_cloud] Tailscale IP : {ts_ip}")
-    print(f"[submit_cloud] MLflow pod   : {mlflow_uri_for_pod}")
-    print(f"[submit_cloud] Mongo pod    : {mongo_uri_for_pod} (via SOCKS5)")
-    # ── Fin bloc Tailscale ─────────────────────────────────────────
-
-    # Image Docker
-    image = (
-        args.cloud_image
-        or os.getenv("GHCR_IMAGE_TRAINER")
-        or f"ghcr.io/{os.getenv('GITHUB_USER', 'guillaumepe').lower()}/mlops-rakuten-trainer:latest"
-    )
-
-    # Commande pod
-    pod_command = [
-        "python", "-m", "src.experiments.runner",
-        "--experiment", args.experiment,
-        "--action", args.cloud_action,
-        "--mlflow-tracking-uri", mlflow_uri_for_pod,
-    ]
-    if args.limit is not None:
-        pod_command += ["--limit", str(args.limit)]
-    if getattr(args, "overrides", None):
-        pod_command += ["--set", *args.overrides]
-    if getattr(args, "warm_start_from", None):
-        pod_command += ["--warm-start-from", args.warm_start_from]
-    
-    # Résolution MLflow tracking URI :
-    # - Si fourni explicitement (CLI ou env) ET hors localhost : on garde tel quel
-    # - Sinon : auto-construction depuis l'IP Tailscale locale (cas standard)
-    mlflow_uri_override = args.mlflow_tracking_uri or os.getenv("MLFLOW_TRACKING_URI", "")
-    local_hosts = ("localhost", "127.0.0.1", "mlflow:5000")
-    if mlflow_uri_override and not any(h in mlflow_uri_override for h in local_hosts):
-        mlflow_uri_for_pod = mlflow_uri_override
-        print(f"[submit_cloud] MLflow URI explicite : {mlflow_uri_for_pod}")
-    else:
-        ts_ip = get_local_tailscale_ip()
-        mlflow_uri_for_pod = f"http://{ts_ip}:5000"
-        print(f"[submit_cloud] MLflow URI auto via Tailscale : {mlflow_uri_for_pod}")
-    
-    # Tailscale auth key : obligatoire pour le pod
-    tailscale_authkey = os.getenv("TAILSCALE_AUTHKEY", "")
-    if not tailscale_authkey:
-        raise RuntimeError(
-            "TAILSCALE_AUTHKEY manquante dans .env. "
-            "Génère une auth key pod (reusable=true, ephemeral=true) dans le dashboard Tailscale."
-        )
-
-    # On passe toujours l'URI résolu au pod, qu'il ait été fourni explicitement ou auto
-    # (utile pour les actions qui lisent args.mlflow_tracking_uri côté pod)
-    pod_command += ["--mlflow-tracking-uri", mlflow_uri_for_pod]
-    
-    pod_env = {
-        # R2 / DVC
-        "R2_ACCESS_KEY_ID": os.getenv("R2_ACCESS_KEY_ID", ""),
-        "R2_SECRET_ACCESS_KEY": os.getenv("R2_SECRET_ACCESS_KEY", ""),
-        "AWS_ACCESS_KEY_ID": os.getenv("R2_ACCESS_KEY_ID", ""),
-        "AWS_SECRET_ACCESS_KEY": os.getenv("R2_SECRET_ACCESS_KEY", ""),
-        "R2_ENDPOINT_URL": os.getenv("R2_ENDPOINT_URL", ""),
-        "R2_BUCKET_NAME": os.getenv("R2_BUCKET_NAME", "rakuten-mlops-dvc"),
-        # MongoDB local via Tailscale
-        "MONGO_URI": mongo_uri_for_pod,
-        "MONGO_PROXY_HOST": "localhost",
-        "MONGO_PROXY_PORT": "1055",
-        "MONGO_DB_NAME": os.getenv("MONGO_DB_NAME", "MAR25_CMLOPS_RAKUTEN"),
-        # Tailscale
-        "TAILSCALE_AUTHKEY": tailscale_authkey,
-        # MLflow
-        "MLFLOW_TRACKING_URI": mlflow_uri_for_pod,
-        # RunPod
-        "RUNPOD_API_KEY": os.getenv("RUNPOD_API_KEY", ""),
-        "DATA_ROOT": "/workspace",
-        "DVC_AUTO_PUSH": "true",
-    }
-    
-    
-    # Targets DVC à puller
-    dvc_targets = args.cloud_dvc_targets or [
-        "data/raw_data/X_train_update.csv.dvc",
-        "data/raw_data/Y_train_update.csv.dvc",
-        "data/raw_data/images/image_train.tar.zst.dvc",
-    ]
-    pod_env["DVC_PULL_TARGETS"] = " ".join(dvc_targets)
-    
-    # Vérifier les vars critiques
-    for key in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "MONGO_URI"):
-        if not pod_env[key]:
-            raise RuntimeError(f"{key} manquante dans .env")
-    
-    # Volume RunPod cache (optionnel)
-    volumes = []
-    volume_id = os.getenv("RUNPOD_VOLUME_ID")
-    if volume_id:
-        volumes.append(VolumeMount(
-            volume_id=volume_id,
-            mount_path=os.getenv("RUNPOD_VOLUME_MOUNT_PATH", "/workspace/cache"),
-        ))
-        print(f"[submit_cloud] Volume cache attaché : {volume_id}")
-    else:
-        print("[submit_cloud] Pas de volume cache (RUNPOD_VOLUME_ID non défini)")
-    
-    print(f"[submit_cloud] Image      : {image}")
-    print(f"[submit_cloud] GPUs cibles : {args.gpu_types}")
-    print(f"[submit_cloud] Commande   : {' '.join(pod_command)}")
-    # Timeout adaptatif par action si pas explicitement override en CLI
-    TIMEOUT_BY_ACTION = {
-        "smoke_tailscale": 300,
-        "prepare_data": 3600,
-        "fit": 7200,
-        "promote": 600,
-    }
-    DEFAULT_TIMEOUT = 3600  # le défaut du parser CLI
-    if args.cloud_timeout == DEFAULT_TIMEOUT:
-        # Pas overridé par l'utilisateur → on prend le défaut spécifique à l'action
-        args.cloud_timeout = TIMEOUT_BY_ACTION.get(args.cloud_action, DEFAULT_TIMEOUT)
-        print(f"[submit_cloud] Timeout auto pour action '{args.cloud_action}' : {args.cloud_timeout}s")
-    print(f"[submit_cloud] Timeout    : {args.cloud_timeout}s")
-    
-    # Submit avec fallback sur la liste de GPUs
-    provider = get_cloud_provider()
-    print(f"[submit_cloud] Provider   : {provider.name}")
-    
-    handle = None
-    last_error = None
-    for gpu_type in args.gpu_types:
-        print(f"[submit_cloud] Tentative GPU : {gpu_type}")
-        job_config = JobConfig(
-            image=image,
-            command=pod_command,
-            env=pod_env,
-            gpu=GPUSpec(gpu_type=gpu_type, count=1),
-            volumes=volumes,
-            name=f"rakuten-{args.experiment}-{args.cloud_action}",
-        )
-        try:
-            handle = provider.submit_job(job_config)
-            print(f"[submit_cloud] ✓ Pod provisionné avec {gpu_type}")
-            print(f"[submit_cloud] Job ID     : {handle.job_id}")
-            break
-        except JobSubmissionError as e:
-            print(f"[submit_cloud] ✗ {gpu_type} indispo : {e}")
-            last_error = e
-            continue
-    
-    if handle is None:
-        raise RuntimeError(
-            f"Aucun GPU dispo dans la liste {args.gpu_types}. "
-            f"Dernière erreur : {last_error}"
-        )
-    
-    # Wait avec polling visible (debug)
-    print(f"[submit_cloud] Attente de la fin du job...")
-    start = time.time()
-    poll_count = 0
-    last_status = JobStatus.UNKNOWN
-    
-    try:
-        while True:
-            poll_count += 1
-            last_status = provider.get_status(handle)
-            elapsed = int(time.time() - start)
-            print(f"[submit_cloud] [t={elapsed}s] Poll #{poll_count} : status={last_status.value}")
-            
-            if last_status in (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.STOPPED):
-                break
-            
-            if elapsed > args.cloud_timeout:
-                print(f"[submit_cloud] Timeout dépassé, stop du pod")
-                provider.stop(handle)
-                raise RuntimeError(f"Timeout après {elapsed}s")
-            
-            time.sleep(10)
-        
-        duration = time.time() - start
-        print(f"[submit_cloud] Job terminé : {last_status.value}")
-        print(f"[submit_cloud] Durée      : {duration:.1f}s")
-    
-    except Exception as e:
-        print(f"[submit_cloud] Erreur wait : {e}")
-        print(f"[submit_cloud] Tentative de stop du pod...")
-        try:
-            provider.stop(handle)
-        except Exception as stop_err:
-            print(f"[submit_cloud] Stop échec : {stop_err}")
-        raise
-    
-    return last_status
 
 def main():
     parser = argparse.ArgumentParser(description="MLOps experiment runner")
@@ -1205,7 +1013,7 @@ def main():
     parser.add_argument(
         "--gpu-types",
         nargs="+",
-        default=["rtx_5090","rtx_4090", "rtx_3090", "rtx_4080", "rtx_a5000", "rtx_a6000","rtx_a4000", "a40", "l40", "l40s", "a100_40gb","rtx_pro_4500"],
+        default=DEFAULT_GPU_TYPES,
         help="(submit_cloud) Liste de GPUs à essayer en cascade (du préféré au fallback)",
 )
     parser.add_argument(
@@ -1286,9 +1094,23 @@ def main():
     
     # Dispatch action
     if args.action == "submit_cloud":
-        # Pas d'init MLflow local : le tracking se fera côté pod
-        cmd_submit_cloud(args, config)
-        return
+        # Pas d'init MLflow local : le tracking se fera côté pod.
+        # Contrat de code de sortie pour Airflow :
+        #   pénurie GPU (cascade épuisée) -> EXIT_NO_CAPACITY (retryable)
+        #   pod FAILED/STOPPED            -> exit 1 (fatal)
+        #   erreur déterministe (raise)   -> propagée -> exit 1 (fatal)
+        from src.cloud.exceptions import NoCapacityError, EXIT_NO_CAPACITY
+        from src.cloud.base import JobStatus
+        try:
+            final_status = cmd_submit_cloud(args, config)
+        except NoCapacityError as e:
+            print(f"[main] Pénurie GPU sur toute la cascade "
+                  f"(retryable, exit {EXIT_NO_CAPACITY}) : {e}")
+            return EXIT_NO_CAPACITY
+        if final_status == JobStatus.SUCCEEDED:
+            return 0
+        print(f"[main] Pod terminé en '{final_status.value}' → échec (exit 1)")
+        return 1
 
     # smoke_tailscale : test de bout en bout sans construire DataModule/Experiment
     if args.action == "smoke_tailscale":

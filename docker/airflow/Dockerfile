@@ -1,0 +1,11 @@
+# Image Airflow mince pour l'option B : orchestration + soumission RunPod.
+# AUCUNE dep ML (torch/lightning/mlflow) — le calcul lourd reste sur le pod.
+FROM apache/airflow:2.8.1-python3.10
+
+# Deps du chemin submit (src.cloud.submit) + pymongo (déjà utilisé par les DAGs).
+# Pinne les versions à celles de ton .venv hôte pour la parité (voir note).
+RUN pip install --no-cache-dir \
+        runpod==1.9.0 \
+        python-dotenv==1.2.2 \
+        pymongo==3.12.0
+        

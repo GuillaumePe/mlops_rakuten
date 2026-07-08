@@ -44,7 +44,10 @@
 
 
 x-airflow-common: &airflow-common
-  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.8.1}
+  build:
+    context: .
+    dockerfile: docker/airflow/Dockerfile
+  image: mlops-rakuten-airflow:2.8.1
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
     AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow_db
@@ -62,9 +65,24 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__WORKER_TIMEOUT: 300
     API_USERNAME: "${API_USERNAME}"
     API_PASSWORD: "${API_PASSWORD}"
-    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:- pymongo}
+    # ── Env submit cloud (option B : soumission RunPod depuis Airflow) ──
+    # Consommées par src.cloud.submit ; le calcul lourd reste sur le pod.
+    RAKUTEN_PROJECT_ROOT: /opt/project
+    IP_Tailscale: "${IP_Tailscale:-100.126.74.73}"   # IP tailscale de l'HÔTE (MLflow+Mongo)
+    TAILSCALE_AUTHKEY: "${TAILSCALE_AUTHKEY}"
+    RUNPOD_API_KEY: "${RUNPOD_API_KEY}"
+    R2_ACCESS_KEY_ID: "${R2_ACCESS_KEY_ID}"
+    R2_SECRET_ACCESS_KEY: "${R2_SECRET_ACCESS_KEY}"
+    R2_ENDPOINT_URL: "${R2_ENDPOINT_URL}"
+    R2_BUCKET_NAME: "${R2_BUCKET_NAME:-rakuten-mlops-dvc}"
+    GHCR_IMAGE_TRAINER: "${GHCR_IMAGE_TRAINER:-}"
+    GITHUB_USER: "${GITHUB_USER:-guillaumepe}"
+    RUNPOD_VOLUME_ID: "${RUNPOD_VOLUME_ID:-}"
+    RUNPOD_VOLUME_MOUNT_PATH: "${RUNPOD_VOLUME_MOUNT_PATH:-/workspace/cache}"
+    MONGO_DB_NAME: "${MONGO_DB_NAME:-MAR25_CMLOPS_RAKUTEN}"
   volumes:
     - ./src/airflow/dags:/opt/airflow/dags
+    - .:/opt/project:ro 
     - ./docker/airflow/logs:/opt/airflow/logs
     - ./docker/airflow/plugins:/opt/airflow/plugins
     - ./docker/airflow/init:/opt/airflow/init

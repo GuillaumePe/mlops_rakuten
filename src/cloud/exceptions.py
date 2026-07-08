@@ -20,6 +20,13 @@ class JobTimeoutError(CloudProviderError):
 class CloudConfigError(CloudProviderError):
     """Configuration cloud invalide (env vars manquantes, etc.)."""
 
+# --- Codes de sortie process (contrat runner.py <-> orchestration Airflow) ---
+# Le runner mappe ses exceptions cloud sur des codes de sortie distincts pour
+# que le DAG décide RETRY vs FAIL-FAST sans parser stderr :
+#   EXIT_NO_CAPACITY (42) -> pénurie GPU transitoire -> RETRYABLE (backoff)
+#   toute autre sortie != 0 -> erreur déterministe   -> FAIL-FAST (pas de retry)
+EXIT_NO_CAPACITY = 42
+
 class NoCapacityError(JobSubmissionError):
     """
     Sous-cas de JobSubmissionError : aucun GPU disponible côté provider
