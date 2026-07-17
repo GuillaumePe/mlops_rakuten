@@ -543,6 +543,12 @@ def build_base_learner_experiment(config: dict) -> tuple[RakutenLightningDataMod
  
     if config.get("warm_start_from"):
         learner_config["warm_start_from"] = config["warm_start_from"]
+    # P.1b — descente explicite de la stratégie de ré-entraînement.
+    # Source de vérité unique pour : (1) le DataModule (replay), (2) le suffixe
+    # d'alias de promotion (@active_{strategy}). Ne PAS inférer depuis la
+    # présence de warm_start_from : au batch 1 la lignée stateful n'a pas
+    # d'ancre à warm-starter, et TextCNN est stateless-only par conception.
+    learner_config["retrain_strategy"] = config.get("retrain_strategy", "stateless")
 
     mlflow_cfg = config["mlflow"]
     # Priorité : env var (set par submit_cloud) > CLI > config YAML > default

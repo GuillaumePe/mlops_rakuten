@@ -670,9 +670,10 @@ def compute_promotion_decision(
     name: str,
     run_id_new: str,
     threshold: float = 0.005,
+    alias: str = "active",
 ) -> bool:
     """
-    True ssi la nouvelle version bat l'@active courant de > threshold sur le
+    True ssi la nouvelle version bat l'alias courant de > threshold sur le
     val_selection actif.
  
     Lit ACTIVE_VAL_SELECTION_VERSION pour résoudre la métrique correcte :
@@ -680,16 +681,19 @@ def compute_promotion_decision(
  
     Args:
         name: registered_model_name (ex: 'rakuten-base-textcnn').
-        run_id_new: run_id de la version candidate (déjà loggée mais pas
-            encore promue @active).
-        threshold: seuil de gain minimal pour promotion. Default 0.005
-            (≈ 1.3σ avec n_val_selection ≈ 4500, ~90% confiance unilatérale).
+        run_id_new: run_id du fit qu'on évalue.
+        threshold: marge minimale de gain F1 (défaut 0.005 ≈ 1.3σ à n_gold≈8500).
+        alias: alias de référence à battre. Défaut 'active' (rétro-compat
+            Phase 1). En Phase 3 multi-lignées, la lignée passe son propre
+            alias : 'active_stateless' ou 'active_stateful', de sorte que
+            chaque trajectoire se compare à SA propre référence et non à
+            celle de l'autre lignée.
  
     Returns:
-        True ssi promotion à @active doit être effectuée.
+        True ssi la promotion doit être effectuée sur l'alias de référence.
         Cas particuliers :
-        - Pas d'@active courant → True (first promotion)
-        - @active courant sans métrique val_selection_v{n} → True (incomparable,
+        - Alias de référence inexistant → True (démarrage de lignée)
+        - Alias de référence sans métrique val_selection_v{n} → True (incomparable,
           on remplace par sécurité avec un warning)
  
     Raises:
@@ -710,17 +714,17 @@ def compute_promotion_decision(
  
     # 2. Score de l'@active courant (si existe)
     try:
-        current_mv = client.get_model_version_by_alias(name, "active")
+        current_mv = client.get_model_version_by_alias(name, alias)
         current_run = client.get_run(current_mv.run_id)
         current_f1 = current_run.data.metrics.get(metric_key)
         if current_f1 is None:
             logger.warning(
-                f"@active de {name} (v{current_mv.version}) n'a pas '{metric_key}'. "
+                f"@{alias} de {name} (v{current_mv.version}) n'a pas '{metric_key}'. "
                 f"Promotion par défaut (incomparable)."
             )
             return True
     except mlflow.exceptions.MlflowException:
-        # Pas d'@active courant : first promotion
+        # Pas d'alias courant : first promotion (démarrage de lignée)
         return True
  
     # 3. Comparaison
@@ -750,3 +754,93 @@ def ensure_device(model_or_learner, device=None):
         model_or_learner.eval()
     
     return device
+
+
+def resolve_active_for_fusion(
+    strategy: str,
+    modalities: tuple[str, ...] = ("text", "image"),
+) -> dict[str, tuple[str, int]]:
+    """
+    Sélectionne, pour chaque modalité, le meilleur base learner de la lignée
+    `strategy` — SANS poser d'alias.
+
+    Remplace la cascade @active_{modality} sur le chemin Phase 3 : au lieu de
+    persister un pointeur EXCLUSIF (qui serait partagé entre lignées, donc
+    source de contamination en mode compare), on CALCULE la sélection à la
+    volée et on la transmet en versions épinglées (XCom → --set).
+
+    Scan : tous les 'rakuten-base-*' taggés modality={m} qui portent l'alias
+    @active_{strategy} ; garde celui dont le F1 sur le val_selection actif est
+    le meilleur.
+
+    Args:
+        strategy: 'stateless' ou 'stateful'. Détermine l'alias lu :
+            @active_{strategy}.
+        modalities: modalités à résoudre (défaut : text + image).
+
+    Returns:
+        {modality: (registered_model_name, version)}
+        ex: {"text": ("rakuten-base-camembert-lora", 9),
+             "image": ("rakuten-base-siglip2", 4)}
+
+    Raises:
+        ValueError: si strategy invalide.
+        RuntimeError: si une modalité n'a aucun candidat (aucun base learner de
+            cette modalité ne porte @active_{strategy} avec la métrique
+            val_selection_v{n} — typiquement au batch 1 d'une lignée stateful).
+    """
+    if strategy not in ("stateless", "stateful"):
+        raise ValueError(
+            f"strategy={strategy!r} invalide. Attendu 'stateless' ou 'stateful'."
+        )
+
+    client = mlflow.tracking.MlflowClient()
+    n = get_active_val_selection_version()
+    metric_key = f"val_selection_v{n}/f1_weighted"
+    alias_name = f"active_{strategy}"
+
+    result: dict[str, tuple[str, int]] = {}
+
+    for modality in modalities:
+        best_name: Optional[str] = None
+        best_version: Optional[int] = None
+        best_f1: float = -1.0
+
+        for rm in client.search_registered_models():
+            if not rm.name.startswith("rakuten-base-"):
+                continue
+            if rm.tags.get("modality") != modality:
+                continue
+            try:
+                mv = client.get_model_version_by_alias(rm.name, alias_name)
+            except mlflow.exceptions.MlflowException:
+                continue  # ce learner n'a pas (encore) de version dans cette lignée
+            try:
+                run = client.get_run(mv.run_id)
+            except mlflow.exceptions.MlflowException:
+                continue
+            f1 = run.data.metrics.get(metric_key)
+            if f1 is None:
+                logger.warning(
+                    f"{rm.name} @{alias_name} (v{mv.version}) n'a pas '{metric_key}' "
+                    f"→ écarté de la sélection {modality}."
+                )
+                continue
+
+            if f1 > best_f1:
+                best_f1, best_name, best_version = f1, rm.name, int(mv.version)
+
+        if best_name is None:
+            raise RuntimeError(
+                f"Aucun base learner de modalité {modality!r} ne porte "
+                f"@{alias_name} avec la métrique '{metric_key}'. "
+                f"La lignée {strategy!r} a-t-elle déjà tourné sur ce batch ?"
+            )
+
+        result[modality] = (best_name, best_version)
+        logger.info(
+            f"resolve_active_for_fusion({strategy!r}) : {modality} → "
+            f"{best_name} v{best_version} (F1 {metric_key}={best_f1:.4f})"
+        )
+
+    return result

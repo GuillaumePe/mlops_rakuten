@@ -308,15 +308,26 @@ class BaseLearnerExperiment:
             )
             
             # Warm-start stateful (T.1)
+            # P.1b — la stratégie vient de la config (source de vérité), PAS de
+            # la présence de warm_start_from. 'compare' est un concept
+            # d'orchestration DAG : il ne doit jamais atteindre un fit.
+            strategy = self.config.get("retrain_strategy", "stateless")
+            if strategy not in ("stateless", "stateful"):
+                raise ValueError(
+                    f"retrain_strategy={strategy!r} invalide au niveau fit. "
+                    f"Attendu 'stateless' ou 'stateful' ('compare' = fan-out DAG)."
+                )
+            mlflow.set_tag("retrain_strategy", strategy)            
             warm_start_uri = self.config.get("warm_start_from")
             if warm_start_uri:
                 from src.models.warm_start import apply_warm_start
                 ws_stats = apply_warm_start(self._learner, warm_start_uri)
-                mlflow.set_tag("retrain_strategy", "stateful")
+
                 mlflow.set_tag("warm_start_from", warm_start_uri)
                 mlflow.log_params({f"warm_start/{k}": v for k, v in ws_stats.items()})
-            else:
-                mlflow.set_tag("retrain_strategy", "stateless")
+            elif strategy == "stateful":
+                # Batch 1 d'une lignée stateful, ou learner stateless-only (TextCNN)
+                mlflow.set_tag("warm_start_from", "none")
                 
             self._learner.fit(
                 X_train,
@@ -457,10 +468,13 @@ class BaseLearnerExperiment:
             # ========================================================== #
             logger.info("[BaseLearnerExperiment.6] Décision promotion @active")
             threshold = self.config.get("promotion_threshold", 0.005)
+            promotion_alias = f"active_{strategy}"
             should_promote = compute_promotion_decision(
-                registered_model_name, self._run_id, threshold=threshold
+                registered_model_name, self._run_id,
+                threshold=threshold, alias=promotion_alias,
             )
             mlflow.log_param("promote_to_active", should_promote)
+            mlflow.log_param("promotion_alias", promotion_alias)
 
             # ========================================================== #
             # 7. Si promu : alias @active + cascade + write parquet        #
@@ -468,16 +482,36 @@ class BaseLearnerExperiment:
             if should_promote:
                 promotion_success = False
                 try:
-                    # 7a. Set alias @active
+                    # 7a. Set alias @active_{strategy} (ancre de warm-start du batch n+1)
                     client.set_registered_model_alias(
-                        registered_model_name, "active", latest_version
+                        registered_model_name, promotion_alias, latest_version
                     )
-                    logger.info(f"[BaseLearnerExperiment.7a] ✓ Promu @active : v{latest_version}")
- 
-                    # 7b. Cascade @active_text / @active_image
-                    logger.info("[BaseLearnerExperiment.7b] Cascade @active_text/image")
-                    refresh_modality_alias(self._learner.modality)
-                    logger.info("[BaseLearnerExperiment.7b] ✓ Cascade OK")
+                    logger.info(
+                        f"[BaseLearnerExperiment.7a] ✓ Promu @{promotion_alias} : v{latest_version}"
+                    )
+                     # 7a-bis. PONT LEGACY (retiré à la fin de P.2) — la lignée
+                    # stateless reproduit le comportement Phase 1 : on pose AUSSI
+                    # le @active nu + la cascade @active_{modality}. Sans ça, les
+                    # consommateurs qui résolvent dynamiquement (_resolve_m3_base_learners
+                    # mode dynamique, resolve_active_base_learners pour m2_best,
+                    # garde-fou cache parquet du DataModule) se cassent entre P.1b et P.2.
+                    # La lignée stateful ne touche PAS ces alias : ils resteraient
+                    # exclusifs et partagés → contamination inter-lignées.
+                    if strategy == "stateless":
+                        client.set_registered_model_alias(
+                            registered_model_name, "active", latest_version
+                        )
+                        logger.info(
+                            f"[BaseLearnerExperiment.7a-bis] Pont legacy : @active → v{latest_version}"
+                        )
+                        refresh_modality_alias(self._learner.modality)
+                        logger.info("[BaseLearnerExperiment.7a-bis] Pont legacy : cascade @active_{modality} OK")
+
+                    # 7b. Pas de cascade @active_{modality} : avec l'épinglage par
+                    # version (XCom DAG), la fusion résout ses base learners par
+                    # numéro de version explicite. L'alias modalité n'a plus de
+                    # consommateur sur le chemin Phase 3 et serait un pointeur
+                    # EXCLUSIF partagé entre lignées → contamination.
  
                     # 7c. Write cache parquet (UNIQUEMENT si promu — invariant M.4bis)
                     logger.info(

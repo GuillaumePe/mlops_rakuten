@@ -42,10 +42,23 @@ def run_reevaluate_actives(
     version: int,
     mongo_uri: str = "",
     tracking_uri: str = "",
+    aliases: tuple[str, ...] = ("active", "active_stateless", "active_stateful"),
     **kwargs,
 ) -> dict:
     """
-    Re-score tous les base learners @active sur val_selection_v{version}.
+    Re-score les base learners actifs sur val_selection_v{version}.
+
+   P.1d — multi-lignées : re-baseline TOUS les alias actifs, pas seulement
+   @active. Sans ça, compute_promotion_decision(alias="active_stateful")
+   comparerait le challenger du batch n+1 à une métrique calculée sur
+   val_selection_v{n-1} → décision de promotion fausse.
+
+   Les (name, version) sont dédupliqués : si @active et @active_stateless
+   pointent sur la même version (pont legacy), un seul forward est fait.
+
+   Args:
+       aliases: alias à re-baseliner. Défaut : le nu (Phase 1) + les deux
+           lignées (Phase 3). Un alias absent est simplement ignoré.
     """
     
     if not tracking_uri:
@@ -115,14 +128,14 @@ def run_reevaluate_actives(
     # ------------------------------------------------------------ #
     # 2. Lister les base learners @active                           #
     # ------------------------------------------------------------ #
-    active_learners = _list_active_learners(client_mlflow)
+    active_learners = _list_active_learners(client_mlflow, aliases)
     if not active_learners:
-        logger.warning("[reevaluate_actives] Aucun base learner @active trouvé.")
+        logger.warning(f"[reevaluate_actives] Aucun base learner pour {aliases}.")
         return {"version": version, "results": {}, "n_val": n_val}
 
     logger.info(
-        f"[reevaluate_actives] {len(active_learners)} @active : "
-        f"{[a['name'] for a in active_learners]}"
+        f"[reevaluate_actives] {len(active_learners)} version(s) à re-scorer : "
+        f"{[f'{a[chr(39)]}' for a in []] or [(a['name'], a['version'], a['aliases']) for a in active_learners]}"
     )
 
     # ------------------------------------------------------------ #
@@ -135,25 +148,27 @@ def run_reevaluate_actives(
         name = info["name"]
         run_id = info["run_id"]
         model_version = info["version"]
+        key = f"{name}:v{model_version}"
 
         try:
-            f1 = _evaluate_learner(name, df_val, y_val)
-            results[name] = {
+            f1 = _evaluate_learner(name, model_version, df_val, y_val)
+            results[key] = {
                 "f1_weighted": round(f1, 4),
                 "version": model_version,
                 "run_id": run_id,
+                "aliases": info["aliases"],
             }
 
             # Log sur le run d'origine
             client_mlflow.log_metric(run_id, metric_key, f1)
             logger.info(
-                f"  {name} v{model_version} : {metric_key}={f1:.4f} "
+                f"  {name} v{model_version} @{info['aliases']} : {metric_key}={f1:.4f} "
                 f"(loggé sur run {run_id[:8]}...)"
             )
 
         except Exception as e:
             logger.error(f"  {name} : échec — {e}")
-            results[name] = {"error": str(e)}
+            results[key] = {"error": str(e)}
 
     # ------------------------------------------------------------ #
     # 4. Log MLflow run récapitulatif                               #
@@ -162,11 +177,15 @@ def run_reevaluate_actives(
     with mlflow.start_run(run_name=f"reevaluate_actives_v{version}"):
         mlflow.log_param("version", version)
         mlflow.log_param("n_val", n_val)
-        mlflow.log_param("active_learners", [a["name"] for a in active_learners])
+        mlflow.log_param("aliases_rebaselined", list(aliases))
+        mlflow.log_param(
+            "active_learners",
+            [f"{a['name']}:v{a['version']}" for a in active_learners],
+        )
 
-        for name, res in results.items():
+        for key, res in results.items():
             if "f1_weighted" in res:
-                safe_name = name.replace(BASE_LEARNER_PREFIX, "")
+                safe_name = key.replace(BASE_LEARNER_PREFIX, "").replace(":", "_")
                 mlflow.log_metric(f"{safe_name}/f1_weighted", res["f1_weighted"])
 
     # ------------------------------------------------------------ #
@@ -179,31 +198,56 @@ def run_reevaluate_actives(
     return summary
 
 
-def _list_active_learners(client: mlflow.tracking.MlflowClient) -> list[dict]:
-    """Liste les registered models rakuten-base-* avec alias @active."""
-    active = []
+def _list_active_learners(
+    client: mlflow.tracking.MlflowClient,
+    aliases: tuple[str, ...] = ("active",),
+) -> list[dict]:
+    """
+    Liste les (registered model, version) portant au moins un des `aliases`.
+
+    Déduplique par (name, version) : si plusieurs alias pointent sur la même
+    version (ex. @active et @active_stateless via le pont legacy), un seul
+    forward sera fait. Les alias qui n'existent pas sont ignorés.
+
+    Returns:
+        [{"name", "version", "run_id", "aliases": [alias, ...]}, ...]
+    """
+    seen: dict[tuple[str, int], dict] = {}
     for rm in client.search_registered_models():
         if not rm.name.startswith(BASE_LEARNER_PREFIX):
             continue
-        try:
-            mv = client.get_model_version_by_alias(rm.name, "active")
-            active.append({
-                "name": rm.name,
-                "version": mv.version,
-                "run_id": mv.run_id,
-            })
-        except Exception:
-            pass  # pas d'alias @active
-    return active
+        for alias in aliases:
+            try:
+                mv = client.get_model_version_by_alias(rm.name, alias)
+            except Exception:
+                continue  # cet alias n'existe pas sur ce modèle
+            key = (rm.name, int(mv.version))
+            if key in seen:
+                seen[key]["aliases"].append(alias)  # même version, alias en plus
+            else:
+                seen[key] = {
+                    "name": rm.name,
+                    "version": int(mv.version),
+                    "run_id": mv.run_id,
+                    "aliases": [alias],
+                }
+    return list(seen.values())
 
 
 def _evaluate_learner(
     registered_name: str,
+    model_version: int,
     df_val: pl.DataFrame,
     y_val: np.ndarray,
 ) -> float:
-    """Charge un @active, predict_proba sur df_val, retourne f1_weighted."""
-    uri = f"models:/{registered_name}@active"
+    """
+    Charge une VERSION précise, predict_proba sur df_val, retourne f1_weighted.
+
+    Chargement par version (pas par alias) : en multi-lignées, un même learner
+    porte des versions différentes selon la stratégie (@active_stateless → v5,
+    @active_stateful → v9). L'alias seul serait ambigu.
+    """
+    uri = f"models:/{registered_name}/{model_version}"
     logger.info(f"  Chargement {uri}...")
 
     pyfunc = mlflow.pyfunc.load_model(uri)
