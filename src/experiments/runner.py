@@ -46,6 +46,7 @@ from src.cloud.factory import get_cloud_provider
 from src.cloud.base import JobConfig, GPUSpec, VolumeMount, JobStatus
 from src.cloud.exceptions import JobSubmissionError, NoCapacityError
 from src.cloud.submit import submit_cloud, DEFAULT_GPU_TYPES
+from src.models.utils import embedding_cache_filename, get_active_val_selection_version, resolve_active_for_fusion
 
 # Registre des dimensions d'embeddings par base learner.
 # Utilisé par build_m2_best_experiment pour résoudre embed_dim
@@ -140,8 +141,7 @@ def resolve_active_base_learners(tracking_uri: str) -> dict:
             "extra_caches": ["embeddings_camembert_lora_v1.parquet", ...],
         }
     """
-    import mlflow
-    from src.models.utils import get_active_val_selection_version
+
  
     mlflow.set_tracking_uri(tracking_uri)
     client = mlflow.MlflowClient()
@@ -181,25 +181,40 @@ def resolve_active_base_learners(tracking_uri: str) -> dict:
     ]
     return result
 
-def _load_base_learner_for_m3(registry_name: str, tracking_uri: str,) -> tuple:
+def _load_base_learner_for_m3(
+    registry_name: str,
+    tracking_uri: str,
+    version: int | None = None,
+    alias: str = "active",
+) -> tuple:
     """
-    Charge un base learner depuis MLflow registry via @active.
+    Charge un base learner depuis MLflow registry.
+
+    P.2d — deux modes :
+      - version explicite (épinglage XCom du DAG) : models:/{name}/{version}.
+        Priorité sur l'alias. C'est LE mécanisme anti-contamination inter-lignées.
+      - alias (défaut 'active', rétro-compat Phase 1) : models:/{name}@{alias}.
  
     Returns:
         (learner, version) : BaseLearner reconstruit + numéro de version
     """
 
     client = MlflowClient(tracking_uri)
-    model_uri = f"models:/{registry_name}@active"
- 
+    if version is not None:
+        model_uri = f"models:/{registry_name}/{int(version)}"
+        resolved_version = int(version)
+        origin = f"v{resolved_version} (épinglée)"
+    else:
+        model_uri = f"models:/{registry_name}@{alias}"
+        mv = client.get_model_version_by_alias(registry_name, alias)
+        resolved_version = int(mv.version)
+        origin = f"@{alias} → v{resolved_version}"
+
     pyfunc_model = mlflow.pyfunc.load_model(model_uri)
     learner = pyfunc_model.unwrap_python_model().learner
+    print(f"[_load_base_learner_for_m3] {registry_name} {origin}")
  
-    mv = client.get_model_version_by_alias(registry_name, "active")
-    version = int(mv.version)
-    print(f"[_load_base_learner_for_m3] {registry_name} @active → v{version}")
- 
-    return learner, version
+    return learner, resolved_version
 
 def _resolve_m3_base_learners(config: dict, tracking_uri: str) -> dict:
     """
@@ -226,10 +241,14 @@ def _resolve_m3_base_learners(config: dict, tracking_uri: str) -> dict:
         text_encoder, text_version = _load_base_learner_for_m3(
             registry_name=bl_cfg["text"]["registry_name"],
             tracking_uri=tracking_uri,
+            version=bl_cfg["text"].get("version"),
+            alias=bl_cfg["text"].get("alias", "active"),
         )
         image_encoder, image_version = _load_base_learner_for_m3(
             registry_name=bl_cfg["image"]["registry_name"],
             tracking_uri=tracking_uri,
+            version=bl_cfg["image"].get("version"),
+            alias=bl_cfg["image"].get("alias", "active"),
         )
  
         return {
@@ -245,52 +264,80 @@ def _resolve_m3_base_learners(config: dict, tracking_uri: str) -> dict:
         }
  
     else:
-        # --- Mode dynamique : @active_text / @active_image ---
-        print("[build_m3] Pas de base_learners dans le YAML → résolution dynamique")
-        client = MlflowClient(tracking_uri)
- 
-        # Trouver le registered model qui porte @active_text
-        # Convention : les alias @active_text et @active_image sont posés
-        # par BaseLearnerExperiment sur le registered model du learner promu
-        result = {}
-        for modality, alias in [("text", "active_text"), ("image", "active_image")]:
-            # Chercher dans tous les registered models lequel porte cet alias
-            found = False
-            for rm in client.search_registered_models():
-                try:
-                    mv = client.get_model_version_by_alias(rm.name, alias)
-                    # Charger le modèle
-                    model_uri = f"models:/{rm.name}@{alias}"
-                    pyfunc_model = mlflow.pyfunc.load_model(model_uri)
-                    learner = pyfunc_model.unwrap_python_model().learner
-                    version = int(mv.version)
- 
-                    # Extraire le nom court depuis le registry name
-                    # "rakuten-base-camembert-lora" → "camembert_lora"
-                    short_name = rm.name.replace("rakuten-base-", "").replace("-", "_")
- 
-                    result[f"{modality}_encoder"] = learner
-                    result[f"{modality}_version"] = version
-                    result[f"{modality}_name"] = short_name
-                    result[f"{modality}_embed_dim"] = learner.embed_dim
- 
-                    print(
-                        f"[build_m3] @{alias} → {rm.name} v{version} "
-                        f"({learner.embed_dim}d)"
-                    )
-                    found = True
-                    break
-                except Exception:
-                    continue
- 
-            if not found:
-                raise RuntimeError(
-                    f"Aucun registered model ne porte l'alias @{alias}. "
-                    f"Lancer les base learners et vérifier les promotions."
+        # --- Mode dynamique : résolution par lignée ---
+        strategy = config.get("retrain_strategy", "stateless")
+
+        if strategy == "stateful":
+            # P.2d — lignée stateful : sélection via @active_stateful (P.1c),
+            # JAMAIS via @active_text/@active_image (pointeurs exclusifs du
+            # pont legacy, posés par la lignée stateless → contamination sinon).
+            # On résout (name, version) puis on charge par version explicite.
+
+            print("[build_m3] Mode dynamique stateful → resolve_active_for_fusion")
+            sel = resolve_active_for_fusion("stateful")
+
+            result = {}
+            for modality in ("text", "image"):
+                reg_name, ver = sel[modality]
+                encoder, resolved_ver = _load_base_learner_for_m3(
+                    registry_name=reg_name,
+                    tracking_uri=tracking_uri,
+                    version=ver,
                 )
- 
-        result["max_len"] = getattr(result["text_encoder"], "max_len", 300)
-        return result
+                short_name = reg_name.replace("rakuten-base-", "").replace("-", "_")
+                result[f"{modality}_encoder"] = encoder
+                result[f"{modality}_version"] = resolved_ver
+                result[f"{modality}_name"] = short_name
+                result[f"{modality}_embed_dim"] = encoder.embed_dim
+                print(
+                    f"[build_m3] stateful {modality} → {reg_name} v{resolved_ver} "
+                    f"({encoder.embed_dim}d)"
+                )
+
+            result["max_len"] = getattr(result["text_encoder"], "max_len", 300)
+            return result
+
+        else:
+            # Mode dynamique stateless : chemin Phase 1 INCHANGÉ
+            # (@active_text / @active_image via le pont legacy)
+            print("[build_m3] Pas de base_learners dans le YAML → résolution dynamique (stateless)")
+            client = MlflowClient(tracking_uri)
+
+            result = {}
+            for modality, alias in [("text", "active_text"), ("image", "active_image")]:
+                found = False
+                for rm in client.search_registered_models():
+                    try:
+                        mv = client.get_model_version_by_alias(rm.name, alias)
+                        model_uri = f"models:/{rm.name}@{alias}"
+                        pyfunc_model = mlflow.pyfunc.load_model(model_uri)
+                        learner = pyfunc_model.unwrap_python_model().learner
+                        version = int(mv.version)
+
+                        short_name = rm.name.replace("rakuten-base-", "").replace("-", "_")
+
+                        result[f"{modality}_encoder"] = learner
+                        result[f"{modality}_version"] = version
+                        result[f"{modality}_name"] = short_name
+                        result[f"{modality}_embed_dim"] = learner.embed_dim
+
+                        print(
+                            f"[build_m3] @{alias} → {rm.name} v{version} "
+                            f"({learner.embed_dim}d)"
+                        )
+                        found = True
+                        break
+                    except Exception:
+                        continue
+
+                if not found:
+                    raise RuntimeError(
+                        f"Aucun registered model ne porte l'alias @{alias}. "
+                        f"Lancer les base learners et vérifier les promotions."
+                    )
+
+            result["max_len"] = getattr(result["text_encoder"], "max_len", 300)
+            return result
 
 
 def build_m2_experiment(config: dict) -> tuple[RakutenLightningDataModule, SklearnExperiment]:
@@ -426,17 +473,57 @@ def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataMod
         or "http://mlflow:5000"
     )
  
-    # Résoudre les base learners : statique (YAML) ou dynamique (MLflow)
+
+    # Résoudre les base learners : statique (YAML/--set) ou dynamique (MLflow)
+    strategy = config.get("retrain_strategy", "stateless")
+    
+    n_val = get_active_val_selection_version()
+
+    # Résoudre les base learners : statique (YAML/--set) ou dynamique (MLflow)
     if "base_learners" in config:
         bl_cfg = config["base_learners"]
+        # P.2e — embed_dim auto-résolu depuis LEARNER_EMBED_DIM si absent
+        # (allège les --set du DAG : name + version suffisent)
+        for m in ("text", "image"):
+            if "embed_dim" not in bl_cfg[m]:
+                bl_cfg[m]["embed_dim"] = LEARNER_EMBED_DIM[bl_cfg[m]["name"]]
+        # P.2e — caches suffixés par lignée, construits si le YAML ne les
+        # fournit pas (mode DAG : versions épinglées via --set)
+        if not dm_cfg.get("extra_embedding_caches"):
+            dm_cfg["extra_embedding_caches"] = [
+                embedding_cache_filename(bl_cfg["text"]["name"], n_val, strategy),
+                embedding_cache_filename(bl_cfg["image"]["name"], n_val, strategy),
+            ]
+            print(f"[build_m2_assembled] Caches ({strategy}) : {dm_cfg['extra_embedding_caches']}")
+    elif strategy == "stateful":
+        # P.2e — lignée stateful : sélection via @active_stateful (P.1c),
+        # JAMAIS via @active_text/@active_image (pointeurs exclusifs du pont
+        # legacy, posés par la lignée stateless → contamination sinon)
+
+        sel = resolve_active_for_fusion("stateful")
+        bl_cfg = {}
+        for m in ("text", "image"):
+            reg_name, ver = sel[m]
+            short = reg_name.replace("rakuten-base-", "")
+            bl_cfg[m] = {"name": short, "embed_dim": LEARNER_EMBED_DIM[short], "version": ver}
+        dm_cfg["extra_embedding_caches"] = [
+            embedding_cache_filename(bl_cfg["text"]["name"], n_val, "stateful"),
+            embedding_cache_filename(bl_cfg["image"]["name"], n_val, "stateful"),
+        ]
+        print(
+            f"[build_m2_assembled] Résolution stateful : "
+            f"text={bl_cfg['text']}, image={bl_cfg['image']}\n"
+            f"[build_m2_assembled]   caches = {dm_cfg['extra_embedding_caches']}"
+        )
     else:
+        # Mode dynamique stateless : chemin Phase 1 INCHANGÉ (@active_text/image
+        # via le pont legacy)
         print("[build_m2_assembled] Pas de base_learners dans le YAML → résolution dynamique")
         bl_info = resolve_active_base_learners(tracking_uri)
         bl_cfg = {
             "text": {"name": bl_info["text"]["name"], "embed_dim": bl_info["text"]["embed_dim"]},
             "image": {"name": bl_info["image"]["name"], "embed_dim": bl_info["image"]["embed_dim"]},
         }
-        # Injecter les caches dans la config datamodule
         dm_cfg["extra_embedding_caches"] = bl_info["extra_caches"]
         print(
             f"[build_m2_assembled]   text  = {bl_cfg['text']['name']} ({bl_cfg['text']['embed_dim']}d, v{bl_info['text']['version']})\n"

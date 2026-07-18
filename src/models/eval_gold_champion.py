@@ -44,6 +44,7 @@ def run_eval_gold_champion(
     mongo_uri: str = "",
     tracking_uri: str = "",
     experiment_name: str = "training_compare",
+    champion_alias: str = "champion",
     **kwargs,
 ) -> dict:
     """
@@ -114,7 +115,7 @@ def run_eval_gold_champion(
     y_gold = encode_labels(y_codes)  # → indices 0-26
 
     # 5. Forward via RakutenScorer (dispatch M2/M3.2 par model_family, ordre préservé)
-    scorer = RakutenScorer.from_champion(model_name, tracking_uri=tracking_uri)
+    scorer = RakutenScorer.from_champion(model_name, tracking_uri=tracking_uri, alias=champion_alias)
     result = scorer.score(raw_df)
 
     # 6. F1 weighted (predictions = indices, y_gold = indices → comparable)
@@ -134,7 +135,8 @@ def run_eval_gold_champion(
         run_id = run.info.run_id
         mlflow.set_tag("role", "champion_regold")
         mlflow.set_tag("model_family", result.model_family)
-        mlflow.set_tag("rescored_model", f"{result.model_name}@champion")
+        mlflow.set_tag("rescored_model", f"{result.model_name}@{champion_alias}")
+        mlflow.set_tag("champion_alias", champion_alias)
         mlflow.log_param("champion_version", result.model_version)
         mlflow.log_param("n_gold", len(y_gold))
         mlflow.log_metric("eval_gold/f1_weighted", f1)

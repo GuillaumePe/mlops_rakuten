@@ -149,9 +149,13 @@ class RakutenScorer:
         cls,
         model_name: str,
         tracking_uri: str = "",
+        alias: str = "champion",
     ) -> "RakutenScorer":
         """
-        Résout le @champion du modèle nommé et construit le scorer.
+                Résout l'alias champion du modèle nommé et construit le scorer.
+
+        P.3c — alias paramétrable : 'champion' (Phase 1, défaut),
+        'champion_stateless' / 'champion_stateful' (Phase 3).
 
         Args:
             model_name: nom du registered model MLflow
@@ -171,11 +175,11 @@ class RakutenScorer:
         # 1. Résoudre @champion
         try:
             version_info = client.get_model_version_by_alias(
-                model_name, "champion"
+                model_name, alias
             )
         except Exception as e:
             raise ValueError(
-                f"Pas de @champion pour '{model_name}'. "
+                f"Pas de @{alias} pour '{model_name}'. "
                 f"Vérifier le registry MLflow. Cause : {e}"
             ) from e
 
@@ -328,7 +332,7 @@ class _ScorerM2:
           (expose extract_embeddings(pl.DataFrame) → np.ndarray)
         """
         # 1. Champion : charger le pyfunc puis extraire le sklearn_model
-        champion_uri = f"models:/{self.model_name}@champion"
+        champion_uri = f"models:/{self.model_name}/{self.model_version}"
         logger.info(f"[_ScorerM2] Chargement champion : {champion_uri}")
         champion_pyfunc = mlflow.pyfunc.load_model(champion_uri)
         self._champion_model = champion_pyfunc._model_impl.sklearn_model
@@ -513,7 +517,7 @@ class _ScorerM3:
     def load(self) -> None:
         """Charge le fusion module + reconstruit les base learners."""
         # 1. Charger le fusion module (nn.Module)
-        fusion_uri = f"models:/{self.model_name}@champion"
+        fusion_uri = f"models:/{self.model_name}/{self.model_version}"
         logger.info(f"[_ScorerM3] Chargement fusion : {fusion_uri}")
         self._fusion_module = mlflow.pytorch.load_model(fusion_uri)
         self._fusion_module.eval()

@@ -284,24 +284,31 @@ def compare_best_models(model_names: list, X_test, y_test, metric=lambda y_true,
 
 #Fonction permettant de promouvoir le meilleur modèle en production
 
-def promotion_exclusive_best_model_to_production(model_name, model_version):
+def promotion_exclusive_best_model_to_production(model_name, model_version, alias="champion"):
+    """
+    Promeut model_version sous l'alias donné (supprime l'alias d'une autre version
+    s'il existe déjà, puis le pose sur model_version).
+
+    P.3a — alias paramétrable : 'champion' (Phase 1, défaut), ou
+    'champion_stateless' / 'champion_stateful' (Phase 3).
+    """
     client = mlflow.tracking.MlflowClient()
 
     # Supprimer l'alias "champion" s'il existe déjà
     try:
-        current_alias_info = client.get_model_version_by_alias(model_name, "champion")
+        current_alias_info = client.get_model_version_by_alias(model_name, alias)
         current_version = current_alias_info.version
         if current_version != model_version:
-            print(f"Suppression de l'alias 'champion' actuellement sur version {current_version}")
-            client.delete_registered_model_alias(model_name, "champion")
+            print(f"Suppression de l'alias '{alias}' actuellement sur version {current_version}")
+            client.delete_registered_model_alias(model_name, alias)
     except mlflow.exceptions.MlflowException:
-        print("Alias 'champion' non trouvé, aucun conflit à résoudre.")
+        print(f"Alias '{alias}' non trouvé, aucun conflit à résoudre.")
 
     # Ajouter alias "champion" à la nouvelle version
-    print(f"Ajout de l'alias 'champion' à {model_name} v{model_version} pour mise en Production")
-    client.set_registered_model_alias(model_name, alias="champion", version=model_version)
+    print(f"Ajout de l'alias '{alias}' à {model_name} v{model_version}")
+    client.set_registered_model_alias(model_name, alias=alias, version=model_version)
 
-    model_uri = f"models:/{model_name}@champion"
+    model_uri = f"models:/{model_name}@{alias}"
     return model_uri
 
 def get_f1_score_from_model_uri(model_uri: str, metric_name: str = "f1_score") -> float:
@@ -360,14 +367,19 @@ def evaluate_promotion_via_logged_metrics(
     candidate_version: str,
     metric_key: str = "eval_gold/f1_weighted",
     epsilon: float = 0.005,
+    champion_alias: str = "champion",
 ) -> PromotionResult:
     """
     Compare un candidat au champion actuel via les métriques MLflow déjà loggées
     (pas de prédiction live).
 
     Logique :
-    - Pas de champion existant → promotion automatique comme baseline
-    - Champion existe → promotion si (candidate - champion) >= epsilon
+    - Alias absent → promotion automatique comme baseline
+    - Alias existant → promotion si (candidate - champion) >= epsilon
+
+    P.3a — champion_alias paramétrable : 'champion' (Phase 1, défaut),
+    'champion_stateless' / 'champion_stateful' (Phase 3). Chaque lignée
+    se compare à SA propre référence.
 
     Note statistique : avec n_gold ≈ 8500 et F1 ≈ 0.85, σ_F1 ≈ 0.004.
     Un epsilon = 0.005 ≈ 1.3σ correspond à ~90% de confiance unilatérale.
@@ -397,16 +409,16 @@ def evaluate_promotion_via_logged_metrics(
 
     # 2. Score du champion actuel (s'il existe)
     try:
-        champion_uri = f"models:/{model_name}@champion"
+        champion_uri = f"models:/{model_name}@{champion_alias}"
         champion_score = get_f1_score_from_model_uri(champion_uri, metric_name=metric_key)
-        champion_mv = client.get_model_version_by_alias(model_name, "champion")
+        champion_mv = client.get_model_version_by_alias(model_name, champion_alias)
         champion_version = champion_mv.version
     except (mlflow.exceptions.MlflowException, RuntimeError):
-        # Pas de champion : promotion automatique
-        promotion_exclusive_best_model_to_production(model_name, candidate_version)
+       # Alias absent : promotion automatique (démarrage de lignée)
+        promotion_exclusive_best_model_to_production(model_name, candidate_version, alias=champion_alias)
         return PromotionResult(
             promoted=True,
-            reason="first_champion (no previous champion in registry)",
+            reason=f"first_{champion_alias} (no previous {champion_alias} in registry)",
             model_name=model_name,
             candidate_version=candidate_version,
             candidate_score=candidate_score,
@@ -416,7 +428,7 @@ def evaluate_promotion_via_logged_metrics(
     # 3. Comparaison avec seuil ε
     gain = candidate_score - champion_score
     if gain >= epsilon:
-        promotion_exclusive_best_model_to_production(model_name, candidate_version)
+        promotion_exclusive_best_model_to_production(model_name, candidate_version, alias=champion_alias)
         return PromotionResult(
             promoted=True,
             reason=f"gain {gain:+.4f} >= epsilon {epsilon:+.4f} (significant)",
@@ -731,6 +743,36 @@ def compute_promotion_decision(
     delta = new_f1 - current_f1
     return delta > threshold
 
+def embedding_cache_filename(
+    learner_name: str,
+    version: int,
+    strategy: str = "stateless",
+) -> str:
+    """
+    Nom canonique du cache parquet d'embeddings d'un base learner.
+
+    Source de vérité UNIQUE du naming (write : _write_cache_parquet ;
+    read : DataModule._load_base_learner_embeddings, resolve dynamique M2).
+
+    Convention lignées (P.2) :
+      - stateless → nom historique Phase 1 : embeddings_{name}_v{n}.parquet
+        (rétro-compat : les caches existants SONT la lignée stateless,
+        aucune régénération GPU requise)
+      - stateful  → embeddings_{name}_stateful_v{n}.parquet
+        (les deux lignées n'écrivent jamais le même fichier → pas de
+        contamination par le cache en mode compare)
+
+    Args:
+        learner_name: nom court ('camembert_lora', ...).
+        version: version du val_selection (ACTIVE_VAL_SELECTION_VERSION).
+        strategy: 'stateless' | 'stateful'.
+    """
+    if strategy not in ("stateless", "stateful"):
+        raise ValueError(
+            f"strategy={strategy!r} invalide. Attendu 'stateless' ou 'stateful'."
+        )
+    suffix = "" if strategy == "stateless" else "_stateful"
+    return f"embeddings_{learner_name}{suffix}_v{version}.parquet"
  
 def ensure_device(model_or_learner, device=None):
     """

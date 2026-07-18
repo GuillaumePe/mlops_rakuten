@@ -618,11 +618,14 @@ class BaseLearnerExperiment:
         cache_df = pl.DataFrame(cache_data)
         logger.info(f"  Cache shape : {cache_df.shape}")
 
-        # Write parquet — filename SANS slugify (cohérence avec
-        # DataModule._load_base_learner_embeddings qui attend le learner_name brut)
-        cache_filename = (
-            f"embeddings_{self.learner_name}_"
-            f"v{get_active_val_selection_version()}.parquet"
+        # Write parquet — naming via le helper unique (P.2a). La lignée vient
+        # de la config (source de vérité P.1b) : stateless = nom historique,
+        # stateful = suffixé → les deux lignées n'écrasent jamais le même fichier.
+        from src.models.utils import embedding_cache_filename
+        cache_filename = embedding_cache_filename(
+            self.learner_name,
+            get_active_val_selection_version(),
+            strategy=self.config.get("retrain_strategy", "stateless"),
         )
         cache_path = self.cache_output_dir / cache_filename
         cache_df.write_parquet(cache_path)

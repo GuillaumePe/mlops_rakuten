@@ -899,10 +899,12 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         """
    
  
-        # Résoudre le chemin du cache
-        cache_filename = (
-            f"embeddings_{learner_name}_"
-            f"v{self._val_selection_version}.parquet"
+        # Résoudre le chemin du cache (naming via helper unique P.2a).
+        # La lignée vient du DataModule (retrain_strategy, posé par le builder).
+        from src.models.utils import embedding_cache_filename
+        _strategy = getattr(self, "retrain_strategy", "stateless") or "stateless"
+        cache_filename = embedding_cache_filename(
+            learner_name, self._val_selection_version, strategy=_strategy,
         )
         cache_path = CACHE_DIR / cache_filename
  
@@ -953,17 +955,36 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         source_model_name = unique_names[0]
         source_model_version = int(unique_versions[0])
  
-        # 5. Guard-fou : vérifier @active en MLflow
+        # 5. Guard-fou : vérifier l'alias de la LIGNÉE en MLflow.
+        # P.2c — le cache stateful se compare à @active_stateful, le stateless à
+        # @active_stateless avec FALLBACK @active (pont legacy : les caches
+        # Phase 1 prédatent @active_stateless). Fix au passage : source_model_name
+        # stocké dans le cache est le nom COURT ; le registry attend
+        # 'rakuten-base-{name}'.
         client = mlflow.tracking.MlflowClient()
-        try:
-            active_mv = client.get_model_version_by_alias(source_model_name, "active")
-            active_version = int(active_mv.version)
-        except mlflow.exceptions.MlflowException as e:
+        registry_name = (
+            source_model_name
+            if source_model_name.startswith("rakuten-base-")
+            else f"rakuten-base-{source_model_name}"
+        )
+        aliases_to_try = (
+            [f"active_{_strategy}", "active"] if _strategy == "stateless"
+            else [f"active_{_strategy}"]
+        )
+        active_version = None
+        for _alias in aliases_to_try:
+            try:
+                active_mv = client.get_model_version_by_alias(registry_name, _alias)
+                active_version = int(active_mv.version)
+                break
+            except mlflow.exceptions.MlflowException:
+                continue
+        if active_version is None:
             raise RuntimeError(
-                f"Modèle {source_model_name} n'a pas d'alias @active en MLflow. "
-                f"Guard-fou M.7 échoue.\n"
-                f"Lancer fit_base_learner pour {learner_name} d'abord."
-            ) from e
+                f"Modèle {registry_name} ne porte aucun de {aliases_to_try} en "
+                f"MLflow. Guard-fou M.7 échoue.\n"
+                f"Lancer fit_base_learner ({_strategy}) pour {learner_name} d'abord."
+            )
  
         # 6. Comparaison : version du cache vs @active courant
         if source_model_version != active_version:

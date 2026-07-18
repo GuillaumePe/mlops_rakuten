@@ -54,6 +54,7 @@ def run_compare_and_promote(
     metric_key: str = "eval_gold/f1_weighted",
     epsilon: float = 0.005,
     tracking_uri: str = "",
+    champion_alias: str = "champion",
     **kwargs,
 ) -> dict:
     """
@@ -67,6 +68,9 @@ def run_compare_and_promote(
         batch_id: pour nommer le run récapitulatif.
         experiment_name: experiment MLflow commun à TOUS les runs comparés.
         metric_key / epsilon: métrique et marge de décision.
+                champion_alias: alias du champion dans le registry. Défaut 'champion'
+            (Phase 1). Phase 3 : 'champion_stateless' ou 'champion_stateful'.
+            Chaque lignée se compare à SA propre référence et promeut son alias.
 
     Returns:
         dict de décision (promoted, best_challenger, gain, f1 de chacun, etc.).
@@ -106,7 +110,7 @@ def run_compare_and_promote(
     # 3. F1 champion RE-SCORÉ (gold courant) + existence d'un @champion
     _, champ_f1 = _read_run_metric(client, exp_id, champion_run_name, metric_key)
     try:
-        champion_mv = client.get_model_version_by_alias(registry_model_name, "champion")
+        champion_mv = client.get_model_version_by_alias(registry_model_name, champion_alias)
         champion_exists = True
         champion_version = champion_mv.version
     except mlflow.exceptions.MlflowException:
@@ -128,16 +132,16 @@ def run_compare_and_promote(
     gain = None
     if not champion_exists or champ_f1 is None:
         reason = (
-            "first_champion (aucun @champion existant)"
+            f"first_{champion_alias} (aucun @{champion_alias} existant)"
             if not champion_exists
-            else "champion re-score absent → traité comme first_champion"
+            else f"{champion_alias} re-score absent → traité comme first"
         )
-        promotion_exclusive_best_model_to_production(registry_model_name, best_version)
+        promotion_exclusive_best_model_to_production(registry_model_name, best_version, alias=champion_alias)
         promoted = True
     else:
         gain = best_f1 - float(champ_f1)
         if gain >= epsilon:
-            promotion_exclusive_best_model_to_production(registry_model_name, best_version)
+            promotion_exclusive_best_model_to_production(registry_model_name, best_version, alias=champion_alias)
             promoted = True
             reason = f"gain {gain:+.4f} >= epsilon {epsilon:+.4f}"
         else:
@@ -152,6 +156,7 @@ def run_compare_and_promote(
     )
     with mlflow.start_run(run_name=rec_name):
         mlflow.set_tag("role", "compare_and_promote")
+        mlflow.set_tag("champion_alias", champion_alias)
         for rn, d in challengers.items():
             mlflow.log_metric(f"challenger/{rn}", d["f1"])
         if champ_f1 is not None:
