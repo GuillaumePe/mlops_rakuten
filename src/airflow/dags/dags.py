@@ -22,12 +22,15 @@ def get_auth_headers():
 
 
 
-# === DAG Training (manuel) ===
+# === DAG Training LEGACY (manuel) — DÉPRÉCIÉ ===
+# Renommé en "Training_legacy" (T.1a) pour libérer le dag_id "Training"
+# pour le nouveau DAG paramétré (T.1b, src/airflow/dags/dag_training.py).
+# Suppression complète prévue en C.2 (après validation e2e T.6).
 @dag(
-    dag_id="Training",
+    dag_id="Training_legacy",
     schedule_interval=None,
     start_date=days_ago(1),
-    tags=["MAR25_CMLOPS_RAKUTEN"],
+    tags=["MAR25_CMLOPS_RAKUTEN","deprecated"],
     catchup=False
 )
 def batch_training():
