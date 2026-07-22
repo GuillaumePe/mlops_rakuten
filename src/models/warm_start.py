@@ -38,6 +38,25 @@ import torch
 import mlflow.pyfunc
 logger = logging.getLogger(__name__)
 
+# ====================================================================== #
+# Fallback cross-lignée [D-T3.5]                                         #
+# ====================================================================== #
+
+
+def _cross_lineage_fallback(uri: str) -> str | None:
+    """
+    Si l'alias stateful n'existe pas (batch 2, premier run),
+    tente la version stateless comme seed.
+
+    models:/name@active_stateful   → models:/name@active_stateless
+    models:/name@champion_stateful → models:/name@champion_stateless
+    Autre → None (pas de fallback)
+    """
+    if "@active_stateful" in uri:
+        return uri.replace("@active_stateful", "@active_stateless")
+    if "@champion_stateful" in uri:
+        return uri.replace("@champion_stateful", "@champion_stateless")
+    return None
 
 # ====================================================================== #
 # Dispatcher                                                              #
@@ -57,29 +76,60 @@ def apply_warm_start(model, warm_start_uri: str) -> dict:
 
     Returns:
         dict avec stats de chargement (type, loaded, total, ...).
+        Si l'URI n'existe pas et qu'un fallback cross-lignée est trouvé,
+        retente avec l'alias de l'autre lignée [D-T3.5].
+        Si aucun fallback → cold start gracieux (pas de crash).
     """
     if not warm_start_uri.startswith("models:/"):
         warm_start_uri = f"models:/{warm_start_uri}"
 
-    import lightning as L
+    def _dispatch(uri):
+        import lightning as L
 
-    # 1. LightningModule direct (M3, M3.2 fusion)
-    if isinstance(model, L.LightningModule):
-        return _warm_start_lightning(model, warm_start_uri)
+        if isinstance(model, L.LightningModule):
+            return _warm_start_lightning(model, uri)
+        if hasattr(model, "net") and hasattr(model, "predict_proba"):
+            return _warm_start_base_learner(model, uri)
+        if hasattr(model, "_base_text_template"):
+            return _warm_start_sklearn(model, uri)
 
-    # 2. BaseLearner (a un .net + predict_proba)
-    if hasattr(model, "net") and hasattr(model, "predict_proba"):
-        return _warm_start_base_learner(model, warm_start_uri)
+        raise ValueError(
+            f"Warm-start non supporté pour {type(model).__name__}. "
+            f"Types supportés : LightningModule, BaseLearner, StackingLGBM."
+        )
 
-    # 3. StackingLGBM (a _base_text_template)
-    if hasattr(model, "_base_text_template"):
-        return _warm_start_sklearn(model, warm_start_uri)
+    try:
+        return _dispatch(warm_start_uri)
+    except Exception as primary_err:
+        # Fallback cross-lignée [D-T3.5]
+        fallback_uri = _cross_lineage_fallback(warm_start_uri)
+        if fallback_uri:
+            logger.warning(
+                f"[warm-start] {warm_start_uri} introuvable "
+                f"({type(primary_err).__name__}: {primary_err}) → "
+                f"fallback cross-lignée : {fallback_uri}"
+            )
+            try:
+                stats = _dispatch(fallback_uri)
+                stats["fallback_from"] = warm_start_uri
+                stats["fallback_to"] = fallback_uri
+                return stats
+            except Exception as fallback_err:
+                logger.warning(
+                    f"[warm-start] Fallback {fallback_uri} également échoué "
+                    f"({type(fallback_err).__name__}) → cold start"
+                )
 
-    raise ValueError(
-        f"Warm-start non supporté pour {type(model).__name__}. "
-        f"Types supportés : LightningModule, BaseLearner, StackingLGBM."
-    )
-
+        # Aucun fallback ou fallback échoué → cold start gracieux
+        logger.warning(
+            f"[warm-start] {warm_start_uri} introuvable, "
+            f"pas de fallback disponible → cold start"
+        )
+        return {
+            "type": "cold_start",
+            "reason": f"{type(primary_err).__name__}: {str(primary_err)[:200]}",
+            "uri_attempted": warm_start_uri,
+        }
 
 # ====================================================================== #
 # 1. Lightning (M3, M3.2)                                                #
