@@ -22,7 +22,7 @@ Convention run_name (§3.4 du plan) :
 """
 from datetime import timedelta
 
-from airflow.decorators import dag
+from airflow.decorators import dag, task
 from airflow.models.param import Param
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.dates import days_ago
@@ -44,6 +44,26 @@ BASE_LEARNERS = [
 # Jinja pré-rendu au runtime dans les overrides templatés de make_cloud_task.
 BATCH_ID_JINJA = "{{ params.batch_id or var.value.batch_id }}"
 
+# 7 fusions, indexées par (experiment_name, cloud_action).
+# M2 = SklearnExperiment (action "fit"), M3 = LightningExperiment ("fit_lightning").
+FUSIONS_STATELESS = {
+    # experiment             cloud_action
+    "m2_benchmark":          "fit",
+    "m2_frugal_ft":          "fit",
+    "m2_best":               "fit",
+    "m3_attention_fusion":      "fit_lightning",
+    "m3_attention_fusion_best": "fit_lightning",
+    "m3_hpo_best":              "fit_lightning",
+    "m3_2_coadaptation":        "fit_lightning",
+}
+
+# Helper : référence Jinja vers un champ du XCom de resolve_active_stateless.
+_XCOM_PREFIX = "{{ ti.xcom_pull(task_ids='resolve_active_stateless')"
+
+
+def _xcom_ref(modality: str, key: str) -> str:
+    """Construit une expression Jinja vers resolve_active_stateless XCom."""
+    return _XCOM_PREFIX + "['" + modality + "']['" + key + "'] }}"
 
 @dag(
     dag_id="Training",
@@ -80,7 +100,7 @@ def training_dag():
     fit_tasks = []
     for experiment in BASE_LEARNERS:
         short = experiment.removeprefix("base_learner_")
-        task = make_cloud_task(
+        fit_task  = make_cloud_task(
             task_id=f"fit_{short}_stateless",
             experiment=experiment,
             cloud_action="fit_base_learner",
@@ -93,7 +113,7 @@ def training_dag():
             # pod cloud ne rend jamais la main.
             execution_timeout=timedelta(hours=3),
         )
-        fit_tasks.append(task)
+        fit_tasks.append(fit_task)
 
     # Point de convergence : ancre pour T.2 (resolve_active + fan-out fusions).
     join_base_learners_stateless = EmptyOperator(
@@ -101,6 +121,93 @@ def training_dag():
     )
 
     fit_tasks >> join_base_learners_stateless
+
+    @task()
+    def resolve_active_stateless(**context):
+        """
+        Résout le meilleur base learner par modalité pour la lignée stateless.
+
+        Appelle resolve_active_for_fusion("stateless") et normalise le retour
+        (tuples) en dicts JSON-safe pour XCom [D-T2.2].
+
+        Returns (XCom push) :
+            {"text":  {"registry_name": "rakuten-base-camembert-lora",
+                       "name": "camembert_lora", "version": 9, "embed_dim": 768},
+             "image": {"registry_name": "rakuten-base-siglip2",
+                       "name": "siglip2", "version": 4, "embed_dim": 768}}
+        """
+        import os
+        import sys
+    
+        project_root = os.getenv("RAKUTEN_PROJECT_ROOT", "/opt/project")
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        
+        import mlflow
+        from src.models.utils import resolve_active_for_fusion
+        from src.experiments.runner import LEARNER_EMBED_DIM
+
+        mlflow.set_tracking_uri(
+            os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+        )
+
+        raw = resolve_active_for_fusion("stateless")
+        result = {}
+        for mod, info in raw.items():
+            reg_name, ver = info[0], info[1]
+            short = reg_name.replace("rakuten-base-", "").replace("-", "_")
+            result[mod] = {
+                "registry_name": reg_name,
+                "name": short,
+                "version": ver,
+                "embed_dim": LEARNER_EMBED_DIM[short],
+            }
+        print(f"[resolve_active_stateless] {result}")
+        return result
+    
+    resolved_stateless = resolve_active_stateless()
+    join_base_learners_stateless >> resolved_stateless
+
+    # ---------------------------------------------------------------- #
+    # Fan-out : 7 fusions stateless, consommant les BL épinglés.       #
+    # Overrides XCom → versions déterministes (pas de re-résolution    #
+    # d'alias au runtime du pod) [D-T2.5].                             #
+    # promotion.enabled=false : la promotion est gérée en T.4          #
+    # (eval_gold_champion + compare_and_promote en local).             #
+    # ---------------------------------------------------------------- #
+    fusion_tasks = []
+    for experiment, cloud_action in FUSIONS_STATELESS.items():
+        overrides = [
+            "retrain_strategy=stateless",
+            f"mlflow.run_name={experiment}_stateless_b{BATCH_ID_JINJA}",
+            "promotion.enabled=false",
+            # Pin base learners depuis XCom resolve_active_stateless
+            f"base_learners.text.registry_name={_xcom_ref('text', 'registry_name')}",
+            f"base_learners.text.name={_xcom_ref('text', 'name')}",
+            f"base_learners.text.version={_xcom_ref('text', 'version')}",
+            f"base_learners.text.embed_dim={_xcom_ref('text', 'embed_dim')}",
+            f"base_learners.image.registry_name={_xcom_ref('image', 'registry_name')}",
+            f"base_learners.image.name={_xcom_ref('image', 'name')}",
+            f"base_learners.image.version={_xcom_ref('image', 'version')}",
+            f"base_learners.image.embed_dim={_xcom_ref('image', 'embed_dim')}",
+        ]
+        fusion_task = make_cloud_task(
+            task_id=f"fit_{experiment}_stateless",
+            experiment=experiment,
+            cloud_action=cloud_action,
+            cloud_timeout=7200,
+            overrides=overrides,
+            execution_timeout=timedelta(hours=3),
+        )
+        fusion_tasks.append(fusion_task)
+
+    # Point de convergence fusions stateless — ancre pour T.4
+    # (eval_gold_champion + compare_and_promote).
+    join_fusions_stateless = EmptyOperator(
+        task_id="join_fusions_stateless"
+    )
+
+    resolved_stateless >> fusion_tasks >> join_fusions_stateless
 
 
 training_instance = training_dag()

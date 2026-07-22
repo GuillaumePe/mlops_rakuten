@@ -190,10 +190,9 @@ def _load_base_learner_for_m3(
     """
     Charge un base learner depuis MLflow registry.
 
-    P.2d — deux modes :
-      - version explicite (épinglage XCom du DAG) : models:/{name}/{version}.
-        Priorité sur l'alias. C'est LE mécanisme anti-contamination inter-lignées.
-      - alias (défaut 'active', rétro-compat Phase 1) : models:/{name}@{alias}.
+    Résolution : version explicite > alias (défaut @active).
+    Le DAG Training passe version= (épinglage XCom [D-T2.5]) ;
++   les runs manuels continuent d'utiliser @active par défaut.
  
     Returns:
         (learner, version) : BaseLearner reconstruit + numéro de version
@@ -212,7 +211,8 @@ def _load_base_learner_for_m3(
 
     pyfunc_model = mlflow.pyfunc.load_model(model_uri)
     learner = pyfunc_model.unwrap_python_model().learner
-    print(f"[_load_base_learner_for_m3] {registry_name} {origin}")
+    print(f"[_load_base_learner_for_m3] {registry_name} → v{resolved_version} "
+            f"(source: {'version pin' if version else f'@{alias}'})")
  
     return learner, resolved_version
 
