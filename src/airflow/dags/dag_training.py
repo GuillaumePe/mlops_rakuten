@@ -60,6 +60,24 @@ FUSIONS_STATELESS = {
 # Helper : référence Jinja vers un champ du XCom de resolve_active_stateless.
 _XCOM_PREFIX = "{{ ti.xcom_pull(task_ids='resolve_active_stateless')"
 
+# Stateful : mêmes fusions, TextCNN exclu des base learners (stateless-only).
+BASE_LEARNERS_STATEFUL = [
+    bl for bl in BASE_LEARNERS if bl != "base_learner_textcnn"
+]
+FUSIONS_STATEFUL = dict(FUSIONS_STATELESS)
+
+# Registry model names par fusion — pour construire l'URI de warm-start
+# stateful (models:/REGISTRY@champion_stateful). Fallback cross-lignée
+# géré par apply_warm_start [D-T3.5].
+FUSION_REGISTRY = {
+    "m2_benchmark":             "rakuten-m2-benchmark",
+    "m2_frugal_ft":             "rakuten-m2-frugal-ft",
+    "m2_best":                  "rakuten-m2-best",
+    "m3_attention_fusion":      "rakuten-m3-attention-fusion",
+    "m3_attention_fusion_best": "rakuten-m3-attention-fusion",
+    "m3_hpo_best":              "rakuten-m3-attention-fusion",
+    "m3_2_coadaptation":        "rakuten-m3-2-coadaptation",
+}
 
 def _xcom_ref(modality: str, key: str) -> str:
     """Construit une expression Jinja vers resolve_active_stateless XCom."""
@@ -94,6 +112,44 @@ def _xcom_ref(modality: str, key: str) -> str:
 def training_dag():
 
     # ---------------------------------------------------------------- #
+    # Branching [D-T3.1] : sélection des lignées.                      #
+    # batch_id == 1 → stateful exclue (pas d'ancre @active_stateful).  #
+    # Fallback cross-lignée [D-T3.5] en warm_start.py si batch 2.      #
+    # ---------------------------------------------------------------- #
+    @task.branch(task_id="select_lineages")
+    def select_lineages(**context):
+        from airflow.models import Variable
+
+        strategy = context["params"]["retrain_strategy"]
+        batch_id = int(
+            context["params"].get("batch_id") or Variable.get("batch_id")
+        )
+
+        branches = []
+        if strategy in ("stateless", "compare"):
+            branches.append("gate_stateless")
+        if strategy in ("stateful", "compare") and batch_id > 1:
+            branches.append("gate_stateful")
+
+        if not branches:
+            raise ValueError(
+                f"Aucune lignée à lancer : strategy={strategy}, "
+                f"batch_id={batch_id}. "
+                f"Stateful requiert batch_id > 1."
+            )
+
+        print(f"[select_lineages] strategy={strategy}, batch_id={batch_id} "
+              f"→ {branches}")
+        return branches
+
+    branching = select_lineages()
+
+    gate_stateless = EmptyOperator(task_id="gate_stateless")
+    gate_stateful = EmptyOperator(task_id="gate_stateful")
+
+    branching >> [gate_stateless, gate_stateful]
+
+    # ---------------------------------------------------------------- #
     # Fan-out : 5 base learners stateless en parallèle.                #
     # Concurrence effective = min(5, slots(training_pool)=3).          #
     # ---------------------------------------------------------------- #
@@ -120,7 +176,7 @@ def training_dag():
         task_id="join_base_learners_stateless"
     )
 
-    fit_tasks >> join_base_learners_stateless
+    gate_stateless >> fit_tasks >> join_base_learners_stateless
 
     @task()
     def resolve_active_stateless(**context):
@@ -209,5 +265,105 @@ def training_dag():
 
     resolved_stateless >> fusion_tasks >> join_fusions_stateless
 
+    # ================================================================ #
+    # LIGNÉE STATEFUL                                                  #
+    # 4 BL (TextCNN exclu), warm-start BL depuis @active_stateful,     #
+    # warm-start fusions depuis @champion_stateful.                    #
+    # Fallback cross-lignée [D-T3.5] si alias inexistant (batch 2).    #
+    # ================================================================ #
+    fit_tasks_sf = []
+    for experiment in BASE_LEARNERS_STATEFUL:
+        short = experiment.removeprefix("base_learner_")
+        fit_task_sf = make_cloud_task(
+            task_id=f"fit_{short}_stateful",
+            experiment=experiment,
+            cloud_action="fit_base_learner",
+            cloud_timeout=7200,
+            overrides=[
+                "retrain_strategy=stateful",
+                f"mlflow.run_name={experiment}_stateful_b{BATCH_ID_JINJA}",
+                f"warm_start_from=models:/rakuten-base-{short}@active_stateful",
+            ],
+            execution_timeout=timedelta(hours=3),
+        )
+        fit_tasks_sf.append(fit_task_sf)
 
+    join_base_learners_stateful = EmptyOperator(
+        task_id="join_base_learners_stateful"
+    )
+    gate_stateful >> fit_tasks_sf >> join_base_learners_stateful
+
+    # ---- Resolve active stateful ---- #
+    @task()
+    def resolve_active_stateful(**context):
+        """Même logique que resolve_active_stateless, pour la lignée stateful."""
+        import os
+        import sys
+
+        project_root = os.getenv("RAKUTEN_PROJECT_ROOT", "/opt/project")
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+
+        import mlflow
+        from src.models.utils import resolve_active_for_fusion
+        from src.experiments.runner import LEARNER_EMBED_DIM
+
+        mlflow.set_tracking_uri(
+            os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+        )
+
+        raw = resolve_active_for_fusion("stateful")
+        result = {}
+        for mod, info in raw.items():
+            reg_name, ver = info[0], info[1]
+            short = reg_name.replace("rakuten-base-", "").replace("-", "_")
+            result[mod] = {
+                "registry_name": reg_name,
+                "name": short,
+                "version": ver,
+                "embed_dim": LEARNER_EMBED_DIM[short],
+            }
+        print(f"[resolve_active_stateful] {result}")
+        return result
+
+    resolved_stateful = resolve_active_stateful()
+    join_base_learners_stateful >> resolved_stateful
+
+    # ---- Fan-out 7 fusions stateful ---- #
+    _XCOM_SF = "{{ ti.xcom_pull(task_ids='resolve_active_stateful')"
+
+    def _xcom_sf_ref(modality: str, key: str) -> str:
+        return _XCOM_SF + "['" + modality + "']['" + key + "'] }}"
+
+    fusion_tasks_sf = []
+    for experiment, cloud_action in FUSIONS_STATEFUL.items():
+        registry = FUSION_REGISTRY[experiment]
+        fusion_task_sf = make_cloud_task(
+            task_id=f"fit_{experiment}_stateful",
+            experiment=experiment,
+            cloud_action=cloud_action,
+            cloud_timeout=7200,
+            overrides=[
+                "retrain_strategy=stateful",
+                f"mlflow.run_name={experiment}_stateful_b{BATCH_ID_JINJA}",
+                "promotion.enabled=false",
+                f"warm_start_from=models:/{registry}@champion_stateful",
+                f"base_learners.text.registry_name={_xcom_sf_ref('text', 'registry_name')}",
+                f"base_learners.text.name={_xcom_sf_ref('text', 'name')}",
+                f"base_learners.text.version={_xcom_sf_ref('text', 'version')}",
+                f"base_learners.text.embed_dim={_xcom_sf_ref('text', 'embed_dim')}",
+                f"base_learners.image.registry_name={_xcom_sf_ref('image', 'registry_name')}",
+                f"base_learners.image.name={_xcom_sf_ref('image', 'name')}",
+                f"base_learners.image.version={_xcom_sf_ref('image', 'version')}",
+                f"base_learners.image.embed_dim={_xcom_sf_ref('image', 'embed_dim')}",
+            ],
+            execution_timeout=timedelta(hours=3),
+        )
+        fusion_tasks_sf.append(fusion_task_sf)
+
+    join_fusions_stateful = EmptyOperator(
+        task_id="join_fusions_stateful"
+    )
+    resolved_stateful >> fusion_tasks_sf >> join_fusions_stateful
+    
 training_instance = training_dag()
