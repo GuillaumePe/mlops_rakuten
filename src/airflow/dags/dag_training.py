@@ -26,7 +26,7 @@ from airflow.decorators import dag, task
 from airflow.models.param import Param
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.dates import days_ago
-
+from airflow.models import Variable
 from cloud_task import make_cloud_task
 
 
@@ -42,7 +42,13 @@ BASE_LEARNERS = [
 
 # batch_id : priorité dag_run.conf > Variable Airflow.
 # Jinja pré-rendu au runtime dans les overrides templatés de make_cloud_task.
-BATCH_ID_JINJA = "{{ params.batch_id or var.value.batch_id }}"
+# Cascade : dag_run.conf (TriggerDagRunOperator depuis Ingestion)
+#         → params (UI "Trigger DAG w/ config")
+#         → Variable Airflow (fallback)
+BATCH_ID_JINJA = "{{ dag_run.conf.get('batch_id', params.batch_id) or var.value.batch_id }}"
+# [D-T5.2] Override commun à TOUTES les tâches fit : pilote la dérivation
+# train_batches=[1..n] dans le runner (et le run_name l'utilise déjà).
+BATCH_ID_OVERRIDE = f"batch_id={BATCH_ID_JINJA}"
 
 # 7 fusions, indexées par (experiment_name, cloud_action).
 # M2 = SklearnExperiment (action "fit"), M3 = LightningExperiment ("fit_lightning").
@@ -78,6 +84,21 @@ FUSION_REGISTRY = {
     "m3_hpo_best":              "rakuten-m3-attention-fusion",
     "m3_2_coadaptation":        "rakuten-m3-2-coadaptation",
 }
+
+# Experiment MLflow par fusion — pour que eval_gold et challenger
+# soient dans le même experiment [D-T4.1].
+# Valeur = config["mlflow"]["experiment_name"] de chaque YAML.
+FUSION_EXPERIMENT = {
+    "m2_benchmark":             "M2_benchmark_phase1",
+    "m2_frugal_ft":             "M2_frugal_ft_phase1",
+    "m2_best":                  "M2_best_phase1",
+    "m3_attention_fusion":      "M3_attention_fusion",
+    "m3_attention_fusion_best": "M3_attention_fusion",
+    "m3_hpo_best":              "M3_attention_fusion",
+    "m3_2_coadaptation":        "M3_2_coadaptation",
+}
+
+STRATEGIES = ("stateless", "stateful")
 
 def _xcom_ref(modality: str, key: str) -> str:
     """Construit une expression Jinja vers resolve_active_stateless XCom."""
@@ -118,12 +139,17 @@ def training_dag():
     # ---------------------------------------------------------------- #
     @task.branch(task_id="select_lineages")
     def select_lineages(**context):
-        from airflow.models import Variable
+        
 
         strategy = context["params"]["retrain_strategy"]
+        # Cascade conf → params → Variable (cohérent avec BATCH_ID_JINJA)
+        conf = context["dag_run"].conf or {}
         batch_id = int(
-            context["params"].get("batch_id") or Variable.get("batch_id")
+            conf.get("batch_id")
+            or context["params"].get("batch_id")
+            or Variable.get("batch_id")
         )
+        strategy = conf.get("retrain_strategy", strategy)
 
         branches = []
         if strategy in ("stateless", "compare"):
@@ -162,6 +188,7 @@ def training_dag():
             cloud_action="fit_base_learner",
             cloud_timeout=7200,  # 2h — borne haute uniforme (validée avec user)
             overrides=[
+                BATCH_ID_OVERRIDE,
                 "retrain_strategy=stateless",
                 f"mlflow.run_name={experiment}_stateless_b{BATCH_ID_JINJA}",
             ],
@@ -234,6 +261,7 @@ def training_dag():
     fusion_tasks = []
     for experiment, cloud_action in FUSIONS_STATELESS.items():
         overrides = [
+            BATCH_ID_OVERRIDE,
             "retrain_strategy=stateless",
             f"mlflow.run_name={experiment}_stateless_b{BATCH_ID_JINJA}",
             "promotion.enabled=false",
@@ -280,6 +308,7 @@ def training_dag():
             cloud_action="fit_base_learner",
             cloud_timeout=7200,
             overrides=[
+                BATCH_ID_OVERRIDE,
                 "retrain_strategy=stateful",
                 f"mlflow.run_name={experiment}_stateful_b{BATCH_ID_JINJA}",
                 f"warm_start_from=models:/rakuten-base-{short}@active_stateful",
@@ -344,6 +373,7 @@ def training_dag():
             cloud_action=cloud_action,
             cloud_timeout=7200,
             overrides=[
+                BATCH_ID_OVERRIDE,
                 "retrain_strategy=stateful",
                 f"mlflow.run_name={experiment}_stateful_b{BATCH_ID_JINJA}",
                 "promotion.enabled=false",
@@ -365,5 +395,169 @@ def training_dag():
         task_id="join_fusions_stateful"
     )
     resolved_stateful >> fusion_tasks_sf >> join_fusions_stateful
-    
+
+    # ================================================================ #
+    # EVAL GOLD + COMPARE & PROMOTE (×14 : 7 fusions × 2 lignées)     #
+    # eval_gold = cloud (forward pass), compare = local (MLflow read). #
+    # ================================================================ #
+    all_promote_joins = []
+
+    for strategy in STRATEGIES:
+        join_fusions = (
+            join_fusions_stateless if strategy == "stateless"
+            else join_fusions_stateful
+        )
+
+        eval_tasks = []
+        for experiment in FUSIONS_STATELESS:
+            eval_task = make_cloud_task(
+                task_id=f"eval_gold_{experiment}_{strategy}",
+                experiment=experiment,
+                cloud_action="eval_gold_champion",
+                cloud_timeout=3600,  # forward only, 1h suffit
+                overrides=[
+                    f"promotion.champion_alias=champion_{strategy}",
+                    f"mlflow.eval_gold_run_name=eval_gold_{experiment}_{strategy}_b{BATCH_ID_JINJA}",
+                ],
+                execution_timeout=timedelta(hours=2),
+            )
+            eval_tasks.append(eval_task)
+
+        join_eval = EmptyOperator(
+            task_id=f"join_eval_{strategy}",
+            trigger_rule="none_failed_min_one_success",
+        )
+        join_fusions >> eval_tasks >> join_eval
+
+        # ---- Compare & promote (local, mlflow-skinny) ---- #
+        @task(task_id=f"compare_promote_{strategy}")
+        def compare_promote(strategy=strategy, **context):
+            """Compare chaque challenger à son champion et promeut si gain > epsilon."""
+            import os
+            import sys
+
+            project_root = os.getenv("RAKUTEN_PROJECT_ROOT", "/opt/project")
+            if project_root not in sys.path:
+                sys.path.insert(0, project_root)
+
+            import mlflow
+            from src.models.compare_and_promote import run_compare_and_promote
+
+            mlflow.set_tracking_uri(
+                os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+            )
+
+            # Cascade conf → params → Variable (cohérent avec select_lineages).
+            # CRITIQUE : la Variable est déjà à n+1 quand Training(n) tourne
+            # (incrémentée par Ingestion juste après le trigger).
+            conf = context["dag_run"].conf or {}
+            batch_id = int(
+                conf.get("batch_id")
+                or context["params"].get("batch_id")
+                or Variable.get("batch_id")
+            )
+
+            results = {}
+            for exp, registry in FUSION_REGISTRY.items():
+                exp_name = FUSION_EXPERIMENT[exp]
+                challenger_rn = f"{exp}_{strategy}_b{batch_id}"
+                champion_rn = f"eval_gold_{exp}_{strategy}_b{batch_id}"
+
+                try:
+                    r = run_compare_and_promote(
+                        registry_model_name=registry,
+                        challenger_run_names=[challenger_rn],
+                        champion_run_name=champion_rn,
+                        batch_id=batch_id,
+                        experiment_name=exp_name,
+                        champion_alias=f"champion_{strategy}",
+                    )
+                    results[exp] = r
+                    print(f"[compare_promote_{strategy}] {exp}: "
+                          f"promoted={r['promoted']}, reason={r['reason']}")
+                except Exception as e:
+                    print(f"[compare_promote_{strategy}] {exp}: ERROR {e}")
+                    results[exp] = {"error": str(e)}
+
+            return results
+
+        promote_task = compare_promote(strategy=strategy)
+        join_eval >> promote_task
+        all_promote_joins.append(promote_task)
+
+    # ================================================================ #
+    # TOURNAMENT — best-of-champions → @production [D-T4.4]            #
+    # Cross-lignée, cross-archi. Alias @production posé sur le         #
+    # registered model du vainqueur (Option C).                        #
+    # ================================================================ #
+    join_all = EmptyOperator(
+        task_id="join_all_promotions",
+        trigger_rule="none_failed_min_one_success",
+    )
+    all_promote_joins >> join_all
+
+    @task()
+    def tournament(**context):
+        """Scanne tous les @champion_*, trouve le meilleur F1 gold, pose @production."""
+        import os
+        import sys
+
+        project_root = os.getenv("RAKUTEN_PROJECT_ROOT", "/opt/project")
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+
+        import mlflow
+
+        tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+        mlflow.set_tracking_uri(tracking_uri)
+        client = mlflow.MlflowClient(tracking_uri)
+
+        best_f1, best_name, best_version, best_alias = -1.0, None, None, None
+
+        for registry in set(FUSION_REGISTRY.values()):
+            for strategy in STRATEGIES:
+                alias = f"champion_{strategy}"
+                try:
+                    mv = client.get_model_version_by_alias(registry, alias)
+                    run = client.get_run(mv.run_id)
+                    f1 = run.data.metrics.get("eval_gold/f1_weighted", -1.0)
+                    print(f"[tournament] {registry}@{alias} v{mv.version} "
+                          f"→ F1={f1:.4f}")
+                    if f1 > best_f1:
+                        best_f1 = f1
+                        best_name = registry
+                        best_version = mv.version
+                        best_alias = alias
+                except Exception:
+                    continue
+
+        if best_name is None:
+            print("[tournament] Aucun champion trouvé → skip")
+            return {"production_set": False}
+
+        # Retirer @production de l'ancien porteur (s'il existe)
+        for registry in set(FUSION_REGISTRY.values()):
+            try:
+                client.delete_registered_model_alias(registry, "production")
+            except Exception:
+                pass
+
+        # Poser @production sur le vainqueur [D-T4.4a Option C]
+        client.set_registered_model_alias(
+            best_name, "production", best_version
+        )
+        print(f"[tournament] @production → {best_name} v{best_version} "
+              f"(F1={best_f1:.4f}, source={best_alias})")
+
+        return {
+            "production_set": True,
+            "model_name": best_name,
+            "version": int(best_version),
+            "f1": best_f1,
+            "source_alias": best_alias,
+        }
+
+    tournament_task = tournament()
+    join_all >> tournament_task
+
 training_instance = training_dag()
