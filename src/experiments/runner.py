@@ -1184,7 +1184,18 @@ def main():
 
     # Injecter dans la config pour que tous les builders/experiments l'utilisent
     config.setdefault("mlflow", {})["tracking_uri"] = tracking_uri
-    
+
+    # [D-T5.2] Dérivation du périmètre de données depuis batch_id.
+    # Si le DAG (ou un run manuel) passe --set batch_id=n, le périmètre
+    # d'entraînement devient batch_1..n. Le YAML Phase 1 (train_batches=[1])
+    # est écrasé — comportement voulu : batch_id est la source de vérité
+    # du cycle de vie. Sans batch_id (runs manuels Phase 1) : inchangé.
+    _bid = config.get("batch_id")
+    if _bid is not None:
+        derived = list(range(1, int(_bid) + 1))
+        config.setdefault("datamodule", {})["train_batches"] = derived
+        print(f"[Runner] batch_id={_bid} → datamodule.train_batches={derived}")    
+
     # Dispatch action
     if args.action == "submit_cloud":
         # Pas d'init MLflow local : le tracking se fera côté pod.
@@ -1247,6 +1258,8 @@ def main():
             batch_id=(args.batch if args.batch is not None else config.get("batch_id")),
             tracking_uri=tracking_uri,
             experiment_name=config.get("mlflow", {}).get("experiment_name", args.experiment),
+            champion_alias=config.get("promotion", {}).get("champion_alias", "champion"),
+            run_name=config.get("mlflow", {}).get("eval_gold_run_name"),
         )
         print(f"[Runner] eval_gold_champion result: {result}")
         return
