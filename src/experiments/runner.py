@@ -42,10 +42,6 @@ from torch.utils.data import DataLoader
 from src.models.assembled.m3_2_coadaptation import M32CoAdaptationFusion
 from src.experiments.strategies.hpo_lightning_experiment import HPOLightningExperiment
 import time
-from src.cloud.factory import get_cloud_provider
-from src.cloud.base import JobConfig, GPUSpec, VolumeMount, JobStatus
-from src.cloud.exceptions import JobSubmissionError, NoCapacityError
-from src.cloud.submit import submit_cloud, DEFAULT_GPU_TYPES
 from src.models.utils import embedding_cache_filename, get_active_val_selection_version, resolve_active_for_fusion
 
 # Registre des dimensions d'embeddings par base learner.
@@ -1062,12 +1058,13 @@ def cmd_submit_cloud(args, config: dict):
     Le paramètre `config` est conservé pour compat de signature avec main(),
     mais inutilisé (le pod recharge sa propre config).
     """
+    from src.cloud.submit import submit_cloud, DEFAULT_GPU_TYPES
     if args.cloud_action is None:
         raise ValueError("--cloud-action requis pour --action submit_cloud")
     return submit_cloud(
         experiment=args.experiment,
         cloud_action=args.cloud_action,
-        gpu_types=args.gpu_types,
+        gpu_types=args.gpu_types or DEFAULT_GPU_TYPES,
         cloud_image=args.cloud_image,
         cloud_timeout=args.cloud_timeout,
         limit=args.limit,
@@ -1106,9 +1103,9 @@ def main():
     parser.add_argument(
         "--gpu-types",
         nargs="+",
-        default=DEFAULT_GPU_TYPES,
-        help="(submit_cloud) Liste de GPUs à essayer en cascade (du préféré au fallback)",
-)
+        default=None,
+        help="(submit_cloud) Liste de GPUs à essayer en cascade." 
+    )
     parser.add_argument(
         "--cloud-image",
         default=None,
@@ -1195,7 +1192,11 @@ def main():
         derived = list(range(1, int(_bid) + 1))
         config.setdefault("datamodule", {})["train_batches"] = derived
         print(f"[Runner] batch_id={_bid} → datamodule.train_batches={derived}")    
-
+        # [D-T6.2b] Même invariant pour le val_selection actif :
+        # Ingestion(n) a rebasé v{n} avant de déclencher Training(n).
+        os.environ["ACTIVE_VAL_SELECTION_VERSION"] = str(int(_bid))
+        print(f"[Runner] batch_id={_bid} → ACTIVE_VAL_SELECTION_VERSION={_bid}")
+        
     # Dispatch action
     if args.action == "submit_cloud":
         # Pas d'init MLflow local : le tracking se fera côté pod.

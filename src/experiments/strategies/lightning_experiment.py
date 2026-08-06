@@ -270,7 +270,12 @@ class LightningExperiment:
             EarlyStopping(monitor="val/f1_weighted", patience=self.patience, mode="max", verbose=True,),
             ModelCheckpoint(monitor="val/f1_weighted", mode="max", save_top_k=1),
         ]
- 
+
+        # M.1 — monitoring GPU (no-op silencieux si CPU/pynvml absent)
+        from src.experiments.monitoring.gpu_stats import GpuStatsCallback
+        if GpuStatsCallback is not None:
+           callbacks.append(GpuStatsCallback())
+
         return L.Trainer(
             max_epochs=self.max_epochs,
             accelerator=self.accelerator,

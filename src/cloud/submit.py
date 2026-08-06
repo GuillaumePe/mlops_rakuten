@@ -98,6 +98,20 @@ def _resolve_host_tailscale_ip() -> str:
         or get_local_tailscale_ip()
     )
 
+def _default_trainer_image() -> str:
+    """
+    [D-M.3] Tag depuis TRAINER_IMAGE_TAG (.env) — source de vérité unique,
+    partagée avec build_and_push.sh. Fail-fast si absent : un fallback
+    :latest serait silencieusement ignoré par le cache RunPod.
+    """
+    tag = os.getenv("TRAINER_IMAGE_TAG")
+    if not tag:
+        raise RuntimeError(
+            "TRAINER_IMAGE_TAG absent de l'environnement (.env). "
+            "Pas de fallback :latest (cache RunPod par tag)."
+        )
+    user = os.getenv("GITHUB_USER", "guillaumepe").lower()
+    return f"ghcr.io/{user}/mlops-rakuten-trainer:{tag}"
 
 def submit_cloud(
     *,
@@ -151,7 +165,7 @@ def submit_cloud(
     image = (
         cloud_image
         or os.getenv("GHCR_IMAGE_TRAINER")
-        or f"ghcr.io/{os.getenv('GITHUB_USER', 'guillaumepe').lower()}/mlops-rakuten-trainer:latest"
+        or _default_trainer_image()
     )
 
     # Commande pod (--mlflow-tracking-uri posé UNE seule fois — fix duplication)

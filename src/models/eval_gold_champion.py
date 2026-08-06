@@ -29,6 +29,7 @@ from sklearn.metrics import f1_score
 from src.data.mongo_utils import get_db
 from src.data.label_encoding import encode_labels
 from src.models.rakuten_scorer import RakutenScorer
+from src.experiments.monitoring.gpu_stats import gpu_sampling
 
 load_dotenv()
 
@@ -45,6 +46,7 @@ def run_eval_gold_champion(
     tracking_uri: str = "",
     experiment_name: str = "training_compare",
     champion_alias: str = "champion",
+    run_name: str | None = None,
     **kwargs,
 ) -> dict:
     """
@@ -115,24 +117,54 @@ def run_eval_gold_champion(
     y_gold = encode_labels(y_codes)  # → indices 0-26
 
     # 5. Forward via RakutenScorer (dispatch M2/M3.2 par model_family, ordre préservé)
-    scorer = RakutenScorer.from_champion(model_name, tracking_uri=tracking_uri, alias=champion_alias)
-    result = scorer.score(raw_df)
-
-    # 6. F1 weighted (predictions = indices, y_gold = indices → comparable)
-    f1 = float(f1_score(y_gold, result.predictions, average="weighted"))
-    logger.info(
-        f"[eval_gold_champion] {result.model_name}@v{result.model_version} "
-        f"({result.model_family}) : eval_gold/f1_weighted={f1:.4f} sur n={len(y_gold)}"
-    )
-
-    # 7. Log MLflow (run dédié, findable par compare_and_promote)
+        # [D-T4.3] Tolérance alias absent (batch 2 stateful : pas encore de @champion_stateful)
+    try:
+        scorer = RakutenScorer.from_champion(
+            model_name, tracking_uri=tracking_uri, alias=champion_alias
+        )
+    except Exception as e:
+        logger.warning(
+            f"[eval_gold_champion] {model_name}@{champion_alias} introuvable "
+            f"({type(e).__name__}: {e}). Premier run de cette lignée → skip."
+        )
+        # Log un run vide pour que compare_and_promote le retrouve
+        # et traite champ_f1=None comme first_champion
+        mlflow.set_experiment(experiment_name)
+        _run_name = run_name or (
+            f"eval_gold_champion_b{batch_id}" if batch_id is not None
+            else "eval_gold_champion"
+        )
+        with mlflow.start_run(run_name=_run_name):
+            mlflow.set_tag("role", "champion_regold")
+            mlflow.set_tag("champion_alias", champion_alias)
+            mlflow.set_tag("skipped", "true")
+            mlflow.set_tag("skip_reason", str(e)[:200])
+        return {
+            "model_name": model_name,
+            "champion_alias": champion_alias,
+            "skipped": True,
+            "reason": str(e),
+        }
+    # 6-7. Run MLflow ouvert AVANT le forward : gpu_sampling flush ses
+    # métriques dans le run actif à la sortie du with (M.1-3). Le run
+    # englobe le forward → sa durée reflète le vrai coût de l'eval.
     mlflow.set_experiment(experiment_name)
-    run_name = (
+    run_name = run_name or (
         f"eval_gold_champion_b{batch_id}" if batch_id is not None
         else "eval_gold_champion"
     )
     with mlflow.start_run(run_name=run_name) as run:
         run_id = run.info.run_id
+
+        with gpu_sampling(n_samples_hint=len(raw_df)):
+            result = scorer.score(raw_df)
+
+        f1 = float(f1_score(y_gold, result.predictions, average="weighted"))
+        logger.info(
+            f"[eval_gold_champion] {result.model_name}@v{result.model_version} "
+            f"({result.model_family}) : eval_gold/f1_weighted={f1:.4f} sur n={len(y_gold)}"
+        )
+
         mlflow.set_tag("role", "champion_regold")
         mlflow.set_tag("model_family", result.model_family)
         mlflow.set_tag("rescored_model", f"{result.model_name}@{champion_alias}")

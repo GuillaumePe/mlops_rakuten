@@ -80,6 +80,9 @@ x-airflow-common: &airflow-common
     RUNPOD_VOLUME_ID: "${RUNPOD_VOLUME_ID:-}"
     RUNPOD_VOLUME_MOUNT_PATH: "${RUNPOD_VOLUME_MOUNT_PATH:-/workspace/cache}"
     MONGO_DB_NAME: "${MONGO_DB_NAME:-MAR25_CMLOPS_RAKUTEN}"
+    MONGO_URI: "mongodb://mongodb:27017"
+    MLFLOW_TRACKING_URI: "http://mlflow:5000"
+    TRAINER_IMAGE_TAG: ${TRAINER_IMAGE_TAG}
   volumes:
     - ./src/airflow/dags:/opt/airflow/dags
     - .:/opt/project:ro 
@@ -287,10 +290,12 @@ services:
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - MLFLOW_ARTIFACT_ROOT=/mlflow/mlruns
       - PYTHONUNBUFFERED=1
-      - SECRET_KEY="${SECRET_KEY}"
-      - AIRFLOW_API_USER="${_AIRFLOW_WWW_USER_USERNAME}"
-      - AIRFLOW_API_PASSWORD="${_AIRFLOW_WWW_USER_PASSWORD}"
-      - MONGO_URI="${MONGO_URI}"
+      - SECRET_KEY=${SECRET_KEY}
+      - API_USERNAME=${API_USERNAME}
+      - API_PASSWORD=${API_PASSWORD}
+      - AIRFLOW_API_USER=${_AIRFLOW_WWW_USER_USERNAME}
+      - AIRFLOW_API_PASSWORD=${_AIRFLOW_WWW_USER_PASSWORD}
+      - MONGO_URI=${MONGO_URI}
     depends_on:
       mongodb:
         condition: service_healthy
@@ -345,8 +350,6 @@ services:
       - /var/run:/var/run:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
-    command:
-      - "--port=8085"
     depends_on:
       - api
     networks:

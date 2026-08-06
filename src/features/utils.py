@@ -1,11 +1,10 @@
 import time
-import torch
 import numpy as np
-from transformers import DistilBertTokenizerFast, DistilBertModel
+
 from bs4 import BeautifulSoup
 import re
 import os
-from PIL import Image
+
 
 def clean_description(text: str) -> str:
     
@@ -36,7 +35,9 @@ def log_progress(current, total, start_time):
 
 
 def extract_text_features_in_batches(texts,tokenizer = None, model= None, batch_size=32, max_length=128):
-    
+    import torch
+    from transformers import DistilBertTokenizerFast, DistilBertModel
+
     if tokenizer == None:
         tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
     if model == None:
@@ -74,6 +75,8 @@ def extract_text_features_in_batches(texts,tokenizer = None, model= None, batch_
 
 
 def extract_images_features(input_dir,image_paths,preprocess,model= None):
+    import torch
+    from PIL import Image
 
     all_embeddings = []
 

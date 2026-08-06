@@ -12,4 +12,7 @@ RUN pip install --no-cache-dir \
         runpod==1.9.0 \
         python-dotenv==1.2.2 \
         pymongo==3.12.0 \
-        mlflow-skinny==3.11.1
+        mlflow-skinny==3.11.1 \
+        numpy \
+        scikit-learn \
+        beautifulsoup4

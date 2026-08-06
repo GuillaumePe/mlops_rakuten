@@ -66,7 +66,7 @@ from src.models.base_learners.image.siglip2 import Siglip2
 if TYPE_CHECKING:
     from src.experiments.datamodule.rakuten_datamodule import RakutenLightningDataModule
     from src.models.base_learners._base import BaseLearner
-
+from src.experiments.monitoring.gpu_stats import gpu_sampling
 from src.models.utils import (
     compute_promotion_decision,
     get_active_val_selection_version,
@@ -328,14 +328,15 @@ class BaseLearnerExperiment:
             elif strategy == "stateful":
                 # Batch 1 d'une lignée stateful, ou learner stateless-only (TextCNN)
                 mlflow.set_tag("warm_start_from", "none")
-                
-            self._learner.fit(
-                X_train,
-                y_train,
-                X_val,
-                y_val,
-                lightning_logger=lightning_logger,
-            )
+
+            with gpu_sampling(n_samples_hint=len(X_train)):    
+                self._learner.fit(
+                    X_train,
+                    y_train,
+                    X_val,
+                    y_val,
+                    lightning_logger=lightning_logger,
+                )
             fit_duration_s = time.time() - fit_start
             logger.info(f"  Fit terminé en {fit_duration_s:.1f}s")
             mlflow.log_metric("fit_duration_s", fit_duration_s)

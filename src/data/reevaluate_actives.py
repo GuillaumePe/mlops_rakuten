@@ -26,7 +26,7 @@ from src.features.utils import clean_description
 from src.data.mongo_utils import get_db
 from src.data.label_encoding import encode_labels
 from src.models.utils import ensure_device
-
+from src.experiments.monitoring.gpu_stats import gpu_sampling
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -139,40 +139,11 @@ def run_reevaluate_actives(
     )
 
     # ------------------------------------------------------------ #
-    # 3. Évaluer chaque @active                                     #
+    # 3+4. Run récap ouvert d'abord (gpu_sampling flush dedans), puis éval de chaque @active sous sampling (M.1-3).
     # ------------------------------------------------------------ #
     results = {}
     metric_key = f"val_selection_v{version}/f1_weighted"
 
-    for info in active_learners:
-        name = info["name"]
-        run_id = info["run_id"]
-        model_version = info["version"]
-        key = f"{name}:v{model_version}"
-
-        try:
-            f1 = _evaluate_learner(name, model_version, df_val, y_val)
-            results[key] = {
-                "f1_weighted": round(f1, 4),
-                "version": model_version,
-                "run_id": run_id,
-                "aliases": info["aliases"],
-            }
-
-            # Log sur le run d'origine
-            client_mlflow.log_metric(run_id, metric_key, f1)
-            logger.info(
-                f"  {name} v{model_version} @{info['aliases']} : {metric_key}={f1:.4f} "
-                f"(loggé sur run {run_id[:8]}...)"
-            )
-
-        except Exception as e:
-            logger.error(f"  {name} : échec — {e}")
-            results[key] = {"error": str(e)}
-
-    # ------------------------------------------------------------ #
-    # 4. Log MLflow run récapitulatif                               #
-    # ------------------------------------------------------------ #
     mlflow.set_experiment("ingestion")
     with mlflow.start_run(run_name=f"reevaluate_actives_v{version}"):
         mlflow.log_param("version", version)
@@ -187,6 +158,32 @@ def run_reevaluate_actives(
             if "f1_weighted" in res:
                 safe_name = key.replace(BASE_LEARNER_PREFIX, "").replace(":", "_")
                 mlflow.log_metric(f"{safe_name}/f1_weighted", res["f1_weighted"])
+        with gpu_sampling(n_samples_hint=n_val * len(active_learners)):
+            for info in active_learners:
+                name = info["name"]
+                run_id = info["run_id"]
+                model_version = info["version"]
+                key = f"{name}:v{model_version}"
+
+                try:
+                    f1 = _evaluate_learner(name, model_version, df_val, y_val)
+                    results[key] = {
+                        "f1_weighted": round(f1, 4),
+                        "version": model_version,
+                        "run_id": run_id,
+                        "aliases": info["aliases"],
+                    }
+
+                    # Log sur le run d'origine
+                    client_mlflow.log_metric(run_id, metric_key, f1)
+                    logger.info(
+                        f"  {name} v{model_version} @{info['aliases']} : {metric_key}={f1:.4f} "
+                        f"(loggé sur run {run_id[:8]}...)"
+                    )
+
+                except Exception as e:
+                    logger.error(f"  {name} : échec — {e}")
+                    results[key] = {"error": str(e)}
 
     # ------------------------------------------------------------ #
     # 5. Set ACTIVE_VAL_SELECTION_VERSION                           #

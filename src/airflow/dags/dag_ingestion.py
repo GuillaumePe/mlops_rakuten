@@ -24,6 +24,8 @@ from airflow.models import Variable
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.dates import days_ago
 from cloud_task import make_cloud_task
+import os
+import sys
 
 @dag(
     dag_id="Ingestion",
@@ -33,6 +35,7 @@ from cloud_task import make_cloud_task
     catchup=False,
     max_active_runs=1,
     doc_md=__doc__,
+    render_template_as_native_obj=True,
 )
 def ingestion_dag():
 
@@ -40,6 +43,9 @@ def ingestion_dag():
     def ingest_batch(**context):
         """I.1 — Valide le batch, pose is_gold + text dans Mongo."""
         batch_id = int(Variable.get("batch_id", default_var=1))
+        project_root = os.getenv("RAKUTEN_PROJECT_ROOT", "/opt/project")
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
         from src.data.ingest_batch import run_ingest_batch
         result = run_ingest_batch(batch_id=batch_id)
         print(f"[Ingestion DAG] ingest_batch({batch_id}) : {result}")
@@ -49,10 +55,18 @@ def ingestion_dag():
     def rebase_val_selection(**context):
         """I.2 — Crée is_val_selection_v{n} dans Mongo (split 10% stratifié)."""
         version = int(Variable.get("batch_id", default_var=1))
+        project_root = os.getenv("RAKUTEN_PROJECT_ROOT", "/opt/project")
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+
         from src.data.rebase_val_selection import run_rebase_val_selection
+
         result = run_rebase_val_selection(version=version)
         print(f"[Ingestion DAG] rebase_val_selection(v{version}) : {result}")
+
         return result
+
+
 
     # I.3 — reevaluate_actives sur RunPod (GPU forward des base learners).
     # Migré de BashOperator vers make_cloud_task (T.5) :
@@ -90,7 +104,7 @@ def ingestion_dag():
         print(f"[Ingestion DAG] batch_id incrémenté : {current} → {new_id}")
         return {"previous": current, "new": new_id}
 
-    ingest_batch() >> rebase_val_selection() >> reevaluate >> increment_batch_id()
+    ingest_batch() >> rebase_val_selection() >> reevaluate >> trigger_training >> increment_batch_id() 
 
 
 ingestion_instance = ingestion_dag()

@@ -31,15 +31,17 @@ from airflow.exceptions import AirflowException, AirflowFailException
 from airflow.operators.python import PythonOperator
 
 # src/airflow/dags/cloud_task.py → parents[3] = racine projet
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-
-# Interpréteur du subprocess runner (override possible sans toucher au code)
 # Racine projet montée dans le conteneur Airflow (option B). Posée par le
 # compose (RAKUTEN_PROJECT_ROOT=/opt/project). Fallback parents[3] pour une
 # exécution hors conteneur (ex. tests sur l'hôte).
 _PROJECT_ROOT = Path(
     os.getenv("RAKUTEN_PROJECT_ROOT") or Path(__file__).resolve().parents[3]
 )
+
+# Interpréteur du subprocess runner (override possible sans toucher au code).
+# sys.executable = le python du worker Airflow — même env, mêmes deps
+# (runpod, dotenv, mlflow-skinny) que le process courant.
+_PYTHON_BIN = sys.executable
 
 def _run_cloud_action(
     *,
@@ -80,7 +82,14 @@ def _run_cloud_action(
     print(f"[make_cloud_task] cmd = {' '.join(cmd)}")
 
     try:
-        rc = subprocess.run(cmd, cwd=str(_PROJECT_ROOT), env=env, check=False).returncode
+        proc = subprocess.Popen(
+            cmd, cwd=str(_PROJECT_ROOT), env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        for line in proc.stdout:      # stream → logger Airflow (job-id RunPod visible)
+            print(line, end="")
+        rc = proc.wait()
     except FileNotFoundError as e:
         # python/module introuvable → bug de config déterministe, pas une pénurie
         raise AirflowFailException(

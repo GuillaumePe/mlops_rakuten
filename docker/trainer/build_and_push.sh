@@ -13,7 +13,11 @@ fi
 GITHUB_USER="${GITHUB_USER:?GITHUB_USER must be set}"
 GHCR_TOKEN="${GHCR_TOKEN:?GHCR_TOKEN must be set}"
 IMAGE_NAME="${IMAGE_NAME:-mlops-rakuten-trainer}"
-TAG="${TAG:-phase-3}"
+# Source de vérité du tag [D-M.3] : arg CLI > .env > erreur.
+if [ -f .env ]; then
+  set -a; source .env; set +a
+fi
+TAG="${1:-${TRAINER_IMAGE_TAG:?TAG manquant : passer en arg ou définir TRAINER_IMAGE_TAG dans .env}}"
 FULL_IMAGE="ghcr.io/${GITHUB_USER}/${IMAGE_NAME}:${TAG}"
 
 echo "==================================="

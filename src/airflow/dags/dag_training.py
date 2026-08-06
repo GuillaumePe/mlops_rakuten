@@ -223,9 +223,18 @@ def training_dag():
         import sys
     
         project_root = os.getenv("RAKUTEN_PROJECT_ROOT", "/opt/project")
+
         if project_root not in sys.path:
             sys.path.insert(0, project_root)
-        
+
+        conf = context["dag_run"].conf or {}
+        batch_id = int(
+            conf.get("batch_id")
+            or context["params"].get("batch_id")
+            or Variable.get("batch_id")
+        )
+
+        os.environ["ACTIVE_VAL_SELECTION_VERSION"] = str(batch_id)
         import mlflow
         from src.models.utils import resolve_active_for_fusion
         from src.experiments.runner import LEARNER_EMBED_DIM
@@ -333,6 +342,14 @@ def training_dag():
         if project_root not in sys.path:
             sys.path.insert(0, project_root)
 
+        conf = context["dag_run"].conf or {}
+        batch_id = int(
+            conf.get("batch_id")
+            or context["params"].get("batch_id")
+            or Variable.get("batch_id")
+        )
+        
+        os.environ["ACTIVE_VAL_SELECTION_VERSION"] = str(batch_id)
         import mlflow
         from src.models.utils import resolve_active_for_fusion
         from src.experiments.runner import LEARNER_EMBED_DIM

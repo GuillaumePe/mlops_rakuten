@@ -8,7 +8,7 @@ scrape_configs:
 
   - job_name: 'cadvisor'
     static_configs:
-      - targets: ['cadvisor:8085']
+      - targets: ['cadvisor:8080']
 
   - job_name: 'prometheus'
     static_configs:
