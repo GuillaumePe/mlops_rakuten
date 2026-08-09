@@ -586,8 +586,11 @@ class ResNet50PartialFT(BaseLearner):
             image_paths, labels=None,
             transform=self._eval_transform, shuffle=False,
         )
+        # Device forcé (cf. _forward_in_batches). Features spatiales pour M3
+        # gardées en fp32 (pas d'autocast) pour ne pas dégrader la fusion.
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.net.to(device)
         self.net.eval()
-        device = next(self.net.parameters()).device
  
         outputs = []
         with torch.no_grad():

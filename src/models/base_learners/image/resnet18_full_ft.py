@@ -579,21 +579,27 @@ class ResNet18FullFT(BaseLearner):
         image_paths = self._build_image_paths(X)
         loader = self._make_loader(image_paths, labels=None, transform=self._eval_transform, shuffle=False)
 
+        # Device forcé (pas déduit des poids) : Lightning remet le net sur CPU
+        # au teardown de fit(), reload MLflow idem. Aligné sur siglip2
+        # (device + eval + autocast bf16, cohérent avec precision=bf16-mixed du fit).
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.net.to(device)
         self.net.eval()
-        device = next(self.net.parameters()).device
+        use_amp = device.type == "cuda"
 
         outputs = []
         with torch.no_grad():
             for batch in loader:
                 x, _ = batch
                 x = x.to(device, non_blocking=True)
-                if return_features:
-                    feat = self.net._features(x)            # (B, 512)
-                    outputs.append(feat.cpu().numpy())
-                else:
-                    logits = self.net(x)
-                    probas = F.softmax(logits, dim=1)
-                    outputs.append(probas.cpu().numpy())
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                    if return_features:
+                        feat = self.net._features(x)            # (B, 512)
+                        outputs.append(feat.float().cpu().numpy())
+                    else:
+                        logits = self.net(x)
+                        probas = F.softmax(logits, dim=1)
+                        outputs.append(probas.float().cpu().numpy())
 
         return np.concatenate(outputs, axis=0).astype(np.float32)
 
@@ -623,8 +629,11 @@ class ResNet18FullFT(BaseLearner):
             image_paths, labels=None,
             transform=self._eval_transform, shuffle=False,
         )
+        # Device forcé (cf. _forward_in_batches). Features spatiales pour M3
+        # gardées en fp32 (pas d'autocast) pour ne pas dégrader la fusion.
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.net.to(device)
         self.net.eval()
-        device = next(self.net.parameters()).device
  
         outputs = []
         with torch.no_grad():

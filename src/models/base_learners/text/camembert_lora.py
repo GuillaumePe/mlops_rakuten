@@ -589,21 +589,27 @@ class CamembertLoRA(BaseLearner):
         texts = self._extract_texts(X)
         loader = self._make_loader(texts, labels=None, shuffle=False)
 
+        # Device forcé (pas déduit des poids) : Lightning remet le net sur CPU
+        # au teardown de fit(), et un reload MLflow arrive aussi sur CPU.
+        # Aligné sur le pattern siglip2 (device + eval + autocast bf16).
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.net.to(device)
         self.net.eval()
-        device = next(self.net.parameters()).device
+        use_amp = device.type == "cuda"
 
         outputs = []
         with torch.no_grad():
             for batch in loader:
                 input_ids = batch["input_ids"].to(device, non_blocking=True)
                 attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-                if return_features:
-                    feat = self.net._features(input_ids, attention_mask)   # (B, 768)
-                    outputs.append(feat.cpu().numpy())
-                else:
-                    logits = self.net(input_ids, attention_mask)
-                    probas = F.softmax(logits, dim=1)
-                    outputs.append(probas.cpu().numpy())
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                    if return_features:
+                        feat = self.net._features(input_ids, attention_mask)   # (B, 768)
+                        outputs.append(feat.float().cpu().numpy())
+                    else:
+                        logits = self.net(input_ids, attention_mask)
+                        probas = F.softmax(logits, dim=1)
+                        outputs.append(probas.float().cpu().numpy())
 
         return np.concatenate(outputs, axis=0).astype(np.float32)
 
@@ -643,8 +649,12 @@ class CamembertLoRA(BaseLearner):
  
         texts = self._extract_texts(X)
         loader = self._make_loader(texts, labels=None, shuffle=False)
+        # Device forcé (cf. _forward_in_batches). Pas d'autocast ici : on
+        # retourne le last_hidden_state complet (features fines pour M3),
+        # gardé en fp32 pour ne pas dégrader la précision des tokens.
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.net.to(device)
         self.net.eval()
-        device = next(self.net.parameters()).device
  
         all_hidden, all_masks = [], []
         with torch.no_grad():

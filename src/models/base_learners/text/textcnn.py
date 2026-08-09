@@ -553,8 +553,12 @@ class TextCNN(BaseLearner):
         ids = _tokenize_and_pad(texts, self.vocab, self._max_len)
         loader = self._make_loader(ids, labels=None, shuffle=False)
 
+        # Device forcé (pas déduit des poids) : Lightning remet le net sur CPU
+        # au teardown de fit(), reload MLflow idem. TextCNN est fp32 (pas de
+        # mixed precision au fit) → device seul, pas d'autocast.
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.net.to(device)
         self.net.eval()
-        device = next(self.net.parameters()).device
 
         outputs = []
         with torch.no_grad():
@@ -606,8 +610,10 @@ class TextCNN(BaseLearner):
         texts = self._extract_texts(X)
         ids = _tokenize_and_pad(texts, self.vocab, self._max_len)
         loader = self._make_loader(ids, labels=None, shuffle=False)
+        # Device forcé (cf. _forward_in_batches). fp32, pas d'autocast.
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.net.to(device)
         self.net.eval()
-        device = next(self.net.parameters()).device
  
         all_features, all_masks = [], []
         with torch.no_grad():
