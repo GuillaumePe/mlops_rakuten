@@ -97,6 +97,13 @@ FUSION_EXPERIMENT = {
     "m3_hpo_best":              "M3_attention_fusion",
     "m3_2_coadaptation":        "M3_2_coadaptation",
 }
+# Fusions dont les base learners sont FIXES (définis dans leur YAML) :
+# le DAG ne doit PAS override base_learners.* — elles réentraînent leurs
+# propres BL (textcnn/resnet50 pour benchmark, camembert_lora/resnet18 pour
+# frugal) sur les données croissantes, pour mesurer l'effet du volume à
+# architecture constante. Overrider les transformerait en clones de m2_best.
+FUSIONS_BL_FIXES = {"m2_benchmark", "m2_frugal_ft"}
+
 
 STRATEGIES = ("stateless", "stateful")
 
@@ -237,7 +244,7 @@ def training_dag():
         os.environ["ACTIVE_VAL_SELECTION_VERSION"] = str(batch_id)
         import mlflow
         from src.models.utils import resolve_active_for_fusion
-        from src.experiments.runner import LEARNER_EMBED_DIM
+        from src.models.learner_registry import LEARNER_EMBED_DIM
 
         mlflow.set_tracking_uri(
             os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
@@ -274,16 +281,20 @@ def training_dag():
             "retrain_strategy=stateless",
             f"mlflow.run_name={experiment}_stateless_b{BATCH_ID_JINJA}",
             "promotion.enabled=false",
-            # Pin base learners depuis XCom resolve_active_stateless
-            f"base_learners.text.registry_name={_xcom_ref('text', 'registry_name')}",
-            f"base_learners.text.name={_xcom_ref('text', 'name')}",
-            f"base_learners.text.version={_xcom_ref('text', 'version')}",
-            f"base_learners.text.embed_dim={_xcom_ref('text', 'embed_dim')}",
-            f"base_learners.image.registry_name={_xcom_ref('image', 'registry_name')}",
-            f"base_learners.image.name={_xcom_ref('image', 'name')}",
-            f"base_learners.image.version={_xcom_ref('image', 'version')}",
-            f"base_learners.image.embed_dim={_xcom_ref('image', 'embed_dim')}",
         ]
+        # BL dynamiques (m2_best, M3) : pin depuis XCom resolve_active_stateless.
+        # BL fixes (benchmark/frugal) : gardent leur YAML statique, pas d'override.
+        if experiment not in FUSIONS_BL_FIXES:
+            overrides += [
+                f"base_learners.text.registry_name={_xcom_ref('text', 'registry_name')}",
+                f"base_learners.text.name={_xcom_ref('text', 'name')}",
+                f"base_learners.text.version={_xcom_ref('text', 'version')}",
+                f"base_learners.text.embed_dim={_xcom_ref('text', 'embed_dim')}",
+                f"base_learners.image.registry_name={_xcom_ref('image', 'registry_name')}",
+                f"base_learners.image.name={_xcom_ref('image', 'name')}",
+                f"base_learners.image.version={_xcom_ref('image', 'version')}",
+                f"base_learners.image.embed_dim={_xcom_ref('image', 'embed_dim')}",
+            ]
         fusion_task = make_cloud_task(
             task_id=f"fit_{experiment}_stateless",
             experiment=experiment,
@@ -352,7 +363,7 @@ def training_dag():
         os.environ["ACTIVE_VAL_SELECTION_VERSION"] = str(batch_id)
         import mlflow
         from src.models.utils import resolve_active_for_fusion
-        from src.experiments.runner import LEARNER_EMBED_DIM
+        from src.models.learner_registry import LEARNER_EMBED_DIM
 
         mlflow.set_tracking_uri(
             os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
@@ -384,17 +395,16 @@ def training_dag():
     fusion_tasks_sf = []
     for experiment, cloud_action in FUSIONS_STATEFUL.items():
         registry = FUSION_REGISTRY[experiment]
-        fusion_task_sf = make_cloud_task(
-            task_id=f"fit_{experiment}_stateful",
-            experiment=experiment,
-            cloud_action=cloud_action,
-            cloud_timeout=7200,
-            overrides=[
-                BATCH_ID_OVERRIDE,
-                "retrain_strategy=stateful",
-                f"mlflow.run_name={experiment}_stateful_b{BATCH_ID_JINJA}",
-                "promotion.enabled=false",
-                f"warm_start_from=models:/{registry}@champion_stateful",
+        overrides_sf = [
+            BATCH_ID_OVERRIDE,
+            "retrain_strategy=stateful",
+            f"mlflow.run_name={experiment}_stateful_b{BATCH_ID_JINJA}",
+            "promotion.enabled=false",
+            f"warm_start_from=models:/{registry}@champion_stateful",
+        ]
+        # Idem stateless : BL fixes gardent leur YAML, dynamiques pinnés XCom.
+        if experiment not in FUSIONS_BL_FIXES:
+            overrides_sf += [
                 f"base_learners.text.registry_name={_xcom_sf_ref('text', 'registry_name')}",
                 f"base_learners.text.name={_xcom_sf_ref('text', 'name')}",
                 f"base_learners.text.version={_xcom_sf_ref('text', 'version')}",
@@ -403,7 +413,13 @@ def training_dag():
                 f"base_learners.image.name={_xcom_sf_ref('image', 'name')}",
                 f"base_learners.image.version={_xcom_sf_ref('image', 'version')}",
                 f"base_learners.image.embed_dim={_xcom_sf_ref('image', 'embed_dim')}",
-            ],
+            ]
+        fusion_task_sf = make_cloud_task(
+            task_id=f"fit_{experiment}_stateful",
+            experiment=experiment,
+            cloud_action=cloud_action,
+            cloud_timeout=7200,
+            overrides=overrides_sf,
             execution_timeout=timedelta(hours=3),
         )
         fusion_tasks_sf.append(fusion_task_sf)

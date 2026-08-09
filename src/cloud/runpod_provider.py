@@ -69,6 +69,8 @@ RUNPOD_STATUS_MAP = {
 _RUNPOD_CAPACITY_PATTERNS = (
     "no longer any instances available",
     "no instances available",
+    "something went wrong",
+    "please try again later",
 )
 
 
