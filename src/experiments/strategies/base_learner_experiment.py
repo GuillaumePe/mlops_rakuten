@@ -72,7 +72,7 @@ from src.models.utils import (
     get_active_val_selection_version,
     refresh_modality_alias,
 )
-
+from src.models.utils import ensure_device
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +295,7 @@ class BaseLearnerExperiment:
 
             # T.2b — log retrain strategy params
             mlflow.log_params(datamodule.retrain_params())
-
+            mlflow.log_param("batch_id", n_val_selection)
             # Fit
             fit_start = time.time()
             lightning_logger = MLFlowLogger(
@@ -340,6 +340,12 @@ class BaseLearnerExperiment:
             fit_duration_s = time.time() - fit_start
             logger.info(f"  Fit terminé en {fit_duration_s:.1f}s")
             mlflow.log_metric("fit_duration_s", fit_duration_s)
+
+            # Lightning ramène le net sur CPU au teardown de fit(). Sans
+            # re-migration, l'éval val_selection (§4) et extract_embeddings
+            # (§7c) tournent en CPU → timeout camembert b2. Même helper que
+            # les chemins de rechargement (reevaluate, RakutenScorer).
+            ensure_device(self._learner)
 
             # ========================================================== #
             # 4. Eval sur val_selection (arbitre @active)                  #
