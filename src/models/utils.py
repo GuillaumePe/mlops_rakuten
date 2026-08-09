@@ -1,15 +1,7 @@
 from __future__ import annotations
 import mlflow
-import optuna
 import numpy as np
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-from lightgbm import LGBMClassifier
-from sklearn.metrics import f1_score
 from dataclasses import dataclass
-import torch
 import logging
 import os
 from typing import Optional
@@ -37,8 +29,7 @@ def get_or_create_experiment(experiment_name):
   else:
       return mlflow.create_experiment(experiment_name)
   
-  # override Optuna's default logging to ERROR only
-optuna.logging.set_verbosity(optuna.logging.ERROR)
+
 
 # define a logging callback that will report on only new challenger parameter configurations if a
 # trial has usurped the state of 'best conditions'
@@ -70,136 +61,6 @@ def champion_callback(study, frozen_trial):
           print(f"Initial trial {frozen_trial.number} achieved value: {frozen_trial.value}")
 
 
-#fonction ojective pour l'optimisation par optuna
-def objective_wrapper_pca(split_operator, X_train, y_train,num_class, metric, hyperparameters):
-    
-    def objective(trial):
-
-      with mlflow.start_run(nested=True):
-    
-        text_feat_cols = [col for col in X_train.columns if col.startswith("text_feat_")]
-        image_feat_cols = [col for col in X_train.columns if col.startswith("image_feat_")]
-    
-        #Search Space
-        all_params = {}
-
-        for param_name, param_value in hyperparameters.items():
-          if param_name=="lgbm__num_leaves" and isinstance(param_value, tuple) and len(param_value) == 3:
-            max_num_leaves = max(min(2 ** all_params["lgbm__max_depth"], param_value[2]), param_value[1])
-            all_params["lgbm__num_leaves"] = trial.suggest_int("lgbm__num_leaves", param_value[1], max_num_leaves)
-          
-          elif isinstance(param_value, tuple) and len(param_value) == 3:
-              if param_value[0] == "int":
-                all_params[param_name] = trial.suggest_int(param_name, param_value[1], param_value[2])
-              elif param_value[0] == "float":
-                all_params[param_name] = trial.suggest_float(param_name, param_value[1], param_value[2], log=True)
-
-        all_params.update({
-                "lgbm__num_class": num_class,
-                "random_state": 42,
-                "verbosity": -1})
-        
-        lgbm__params = {
-                    "lgbm__num_leaves": all_params["lgbm__num_leaves"],
-                    "lgbm__max_depth": all_params["lgbm__max_depth"],
-                    "lgbm__learning_rate": all_params["lgbm__learning_rate"],
-                    "lgbm__n_estimators": all_params["lgbm__n_estimators"],
-                    "lgbm__subsample": all_params["lgbm__subsample"],
-                    "lgbm__colsample_bytree": all_params["lgbm__colsample_bytree"],
-                    "lgbm__scale_pos_weight":all_params["lgbm__scale_pos_weight"],
-                    "lgbm__min_split_gain":all_params["lgbm__min_split_gain"],
-                    "lgbm__num_class":all_params["lgbm__num_class"],
-                    "random_state": all_params["random_state"],
-                    "verbosity": all_params["verbosity"]
-                  }
-        
-        # Pipelines
-        text_pipeline = Pipeline([
-             ("scaler", StandardScaler()),
-             ("pca", PCA(n_components=all_params["preprocessor__text__pca__n_components"]))])
-        image_pipeline = Pipeline([
-             ("scaler", StandardScaler()),
-             ("pca", PCA(n_components=all_params["preprocessor__image__pca__n_components"]))])
-        preprocessor = ColumnTransformer([
-             ("text", text_pipeline, text_feat_cols),
-             ("image", image_pipeline, image_feat_cols)])
-        pipeline = Pipeline([
-            ("preprocessor", preprocessor),
-            ("lgbm", LGBMClassifier(**lgbm__params))])
-
-        f1_scores = []
-
-        for train_idx, val_idx in split_operator.split(X_train, y_train):
-          X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
-          y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
-
-
-          pipeline.fit(X_tr, y_tr)
-          preds = pipeline.predict(X_val)
-          f1 = metric(y_val, preds, average="weighted")
-          f1_scores.append(f1)
-
-        # Log to MLflow
-        mlflow.log_params(all_params)
-        mlflow.log_metric("meaned weighted f1 score", np.mean(f1_scores))
-        mlflow.log_metric("std weighted f1 score", np.std(f1_scores))
-
-        return np.mean(f1_scores)-np.std(f1_scores)
-    return objective
-
-
-
-def objective_wrapper_lgbm(split_operator, X_train, y_train,num_class, metric,):
-    
-    def objective(trial):
-
-      with mlflow.start_run(nested=True):
-        
-        max_depth = trial.suggest_int("max_depth", 3, 20)
-        max_num_leaves = min(2**max_depth, 200)
-        num_leaves = trial.suggest_int("num_leaves", 50, max_num_leaves)
-        learning_rate = trial.suggest_float("learning_rate", 0.01, 0.5, log=True)
-        n_estimators= trial.suggest_int("n_estimators", 100, 500)
-        min_split_gain = trial.suggest_float("min_split_gain",0,1)
-        subsample = trial.suggest_float("subsample", 0.6, 1.0),
-        colsample_bytree = trial.suggest_float("colsample_bytree", 0.4, 1.0)
-        scale_pos_weight = trial.suggest_float("scale_pos_weight", 20, 80)
-        params = {
-            "num_leaves": max_depth,
-            "max_depth": num_leaves,
-            "learning_rate": learning_rate,
-            "n_estimators": n_estimators,
-            "min_split_gain": min_split_gain,
-            "subsample": subsample,
-            "colsample_bytree": colsample_bytree,
-            "scale_pos_weight": scale_pos_weight,
-            "num_class":num_class,
-            "random_state": 42,
-           "verbosity": -1
-          }
-        
-        pipeline = LGBMClassifier(**params)
-
-        f1_scores = []
-
-        for train_idx, val_idx in split_operator.split(X_train, y_train):
-          X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
-          y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
-
-
-          pipeline.fit(X_tr, y_tr)
-          preds = pipeline.predict(X_val)
-          f1 = metric(y_val, preds, average="weighted")
-          f1_scores.append(f1)
-
-        # Log to MLflow
-        mlflow.log_params(params)
-        mlflow.log_metric("meaned weighted f1 score", np.mean(f1_scores))
-        mlflow.log_metric("std weighted f1 score", np.std(f1_scores))
-
-        return np.mean(f1_scores)-np.std(f1_scores)
-    return objective
-
 ###fonction permettant d'établir automatiquement des nom de run incrémentale en fonctipon des exp déjà existante dans mlflow
 def ordinal(n):
     return ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"][n-1] if n <= 10 else f"{n}th"
@@ -225,7 +86,11 @@ def get_next_run_name(base_name="attempt",experiment_name="GP_optuna_lightgbm_st
 
 
 #fonction d'evaluation permettant de comparer une liste de versions d'un modèle enregistré dans le registre MLflow
-def compare_model_versions(model_name, versions, X_test, y_test, metric=lambda y_true, y_pred: f1_score(y_true, y_pred, average="weighted")):
+def compare_model_versions(model_name, versions, X_test, y_test, metric=None):
+
+    if metric is None:
+        from sklearn.metrics import f1_score
+        metric = lambda y_true, y_pred: f1_score(y_true, y_pred, average="weighted")
     best_score = -float('inf')
     best_version = None
 
@@ -253,7 +118,11 @@ def compare_model_versions(model_name, versions, X_test, y_test, metric=lambda y
     return best_version
 
 
-def compare_best_models(model_names: list, X_test, y_test, metric=lambda y_true, y_pred: f1_score(y_true, y_pred, average="weighted")):
+def compare_best_models(model_names: list, X_test, y_test, metric=None):
+
+    if metric is None:
+        from sklearn.metrics import f1_score
+        metric = lambda y_true, y_pred: f1_score(y_true, y_pred, average="weighted")
     
     best_score = -float('inf')
     best_model = None
@@ -782,6 +651,7 @@ def ensure_device(model_or_learner, device=None):
     - BaseLearner avec .net (CamemBERT, ResNet, SigLIP, TextCNN)
     - Module PyTorch direct (M3AttentionFusion, M32CoAdaptation)
     """
+    import torch
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
