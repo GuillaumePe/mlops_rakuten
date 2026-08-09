@@ -47,16 +47,7 @@ from src.models.utils import embedding_cache_filename, get_active_val_selection_
 # Registre des dimensions d'embeddings par base learner.
 # Utilisé par build_m2_best_experiment pour résoudre embed_dim
 # à partir du learner_name trouvé via @active_text/@active_image.
-LEARNER_EMBED_DIM = {
-    "textcnn": 3072,
-    "camembert_lora": 768,
-    "camembert_frozen": 768,
-    "resnet50_partial_ft": 2048,
-    "resnet18_full_ft": 512,
-    "resnet18_frozen": 512,
-    "siglip2": 768,    
-}
-
+from src.models.learner_registry import LEARNER_EMBED_DIM
 
 CONFIG_DIR = Path("src/experiments/config")
 
@@ -483,14 +474,18 @@ def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataMod
         for m in ("text", "image"):
             if "embed_dim" not in bl_cfg[m]:
                 bl_cfg[m]["embed_dim"] = LEARNER_EMBED_DIM[bl_cfg[m]["name"]]
-        # P.2e — caches suffixés par lignée, construits si le YAML ne les
-        # fournit pas (mode DAG : versions épinglées via --set)
-        if not dm_cfg.get("extra_embedding_caches"):
-            dm_cfg["extra_embedding_caches"] = [
-                embedding_cache_filename(bl_cfg["text"]["name"], n_val, strategy),
-                embedding_cache_filename(bl_cfg["image"]["name"], n_val, strategy),
-            ]
-            print(f"[build_m2_assembled] Caches ({strategy}) : {dm_cfg['extra_embedding_caches']}")
+        # Recalcul SYSTÉMATIQUE du cache avec n_val courant. Le YAML hardcode
+        # souvent _v1 (Phase 1) ; en multi-batch il faut _v{n}. Vaut pour BL
+        # fixes (benchmark/frugal : name inchangé, version du cache mise à jour)
+        # ET BL overridés par --set (m2_best-like). Sans ça, le cache statique
+        # du YAML est chargé → mismatch de colonnes (bug batch 2).
+        dm_cfg["extra_embedding_caches"] = [
+            embedding_cache_filename(bl_cfg["text"]["name"], n_val, strategy),
+            embedding_cache_filename(bl_cfg["image"]["name"], n_val, strategy),
+        ]
+        print(f"[build_m2_assembled] Caches ({strategy}, n={n_val}): "
+              f"{dm_cfg['extra_embedding_caches']}")
+            
     elif strategy == "stateful":
         # P.2e — lignée stateful : sélection via @active_stateful (P.1c),
         # JAMAIS via @active_text/@active_image (pointeurs exclusifs du pont
