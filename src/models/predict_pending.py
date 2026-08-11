@@ -29,6 +29,7 @@ import polars as pl
 from src.data.mongo_utils import get_db
 from src.models.rakuten_scorer import RakutenScorer
 from src.data.label_encoding import decode_labels
+from src.models.utils import resolve_production_model
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -51,8 +52,9 @@ DEFAULT_MODEL_NAME = "rakuten-m2-best"
 
 def run_predict_pending(
     threshold: int = DEFAULT_THRESHOLD,
-    model_name: str = DEFAULT_MODEL_NAME,
+    model_name: str | None = None,
     mongo_uri: str = "",
+    batch_id: int | None = None,
     **kwargs,
 ) -> dict:
     """
@@ -61,8 +63,12 @@ def run_predict_pending(
     Args:
         threshold: nombre minimum de samples pour déclencher le scoring.
             Si la queue est plus petite, no-op.
-        model_name: nom du registered model MLflow à utiliser.
+        model_name: registered model MLflow à scorer. None (défaut) → résolution
+            du @production (vainqueur du tournament cross-model, version épinglée).
+            Chaîne explicite → chemin debug/CLI (alias @champion du modèle nommé).
         mongo_uri: URI MongoDB. Défaut: MONGO_URI env var.
+        batch_id: batch courant, injecté dans Prediction pour l'analytique.
+            Fourni par le DAG (Variable Airflow) ; None hors contexte.
         **kwargs: ignoré (PythonOperator passe context, etc.)
 
     Returns:
@@ -116,7 +122,17 @@ def run_predict_pending(
     # ------------------------------------------------------------ #
     # 4. Scorer                                                     #
     # ------------------------------------------------------------ #
-    scorer = RakutenScorer.from_champion(model_name)
+    if model_name is None:
+        # Production : vainqueur du tournament cross-model (@production, exclusif).
+        # Résolu UNE fois → chargé par version épinglée (pas de re-résolution
+        # d'alias au load : cohérence si promotion concurrente).
+        prod_name, prod_version = resolve_production_model()
+        scorer = RakutenScorer.from_champion(prod_name, version=prod_version)
+        alias_source = "production"
+    else:
+        # Debug/CLI : modèle nommé explicitement (alias @champion).
+        scorer = RakutenScorer.from_champion(model_name)
+        alias_source = "manual"
     result = scorer.score(raw_df)
 
     logger.info(
@@ -141,6 +157,8 @@ def run_predict_pending(
             "date_pred": now,
             "model": model_tag,
             "model_family": result.model_family,
+            "alias_source": alias_source,
+            "batch_id": batch_id,
         })
 
     if prediction_records:
@@ -160,6 +178,8 @@ def run_predict_pending(
         "scored": len(prediction_records),
         "model": model_tag,
         "model_family": result.model_family,
+        "alias_source": alias_source,
+        "batch_id": batch_id,
         "timestamp": now,
         "queue_size_before": queue_size,
         "deleted_from_queue": delete_result.deleted_count,

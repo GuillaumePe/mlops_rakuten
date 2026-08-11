@@ -120,3 +120,4 @@ mongo_dump_local/
 # DVC-tracked outputs (gérés par DVC remote, pas Git)
 data/cache/*.parquet
 data/cache/*.pkl
+docker/airflow/logs/

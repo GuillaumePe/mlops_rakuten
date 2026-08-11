@@ -1247,6 +1247,21 @@ def main():
         result = run_reevaluate_actives(version=int(version))
         print(f"[Runner] reevaluate_actives result: {result}")
         return
+    if args.action == "predict_pending":
+        # Forward batch du @production sur la file X_to_predict (GPU, doctrine).
+        # model_name=None → résolution @production SUR LE POD (MLflow via Tailscale).
+        # threshold / batch_id : injectés par le DAG via --set (racine config).
+        from src.models.predict_pending import run_predict_pending
+        threshold = int(config.get("predict_threshold", 50))
+        _bid = config.get("batch_id")
+        batch_id = int(_bid) if _bid is not None else None
+        result = run_predict_pending(
+            threshold=threshold,
+            model_name=None,
+            batch_id=batch_id,
+        )
+        print(f"[Runner] predict_pending result: {result}")
+        return
     if args.action == "eval_gold_champion":
         from src.models.eval_gold_champion import run_eval_gold_champion
         result = run_eval_gold_champion(

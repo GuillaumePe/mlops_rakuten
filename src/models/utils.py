@@ -756,3 +756,70 @@ def resolve_active_for_fusion(
         )
 
     return result
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 4 — Résolution @production (P4.1) — tournament cross-model
+# ═════════════════════════════════════════════════════════════════════════════
+
+def resolve_production_model(tracking_uri: str = "") -> tuple[str, int]:
+    """
+    Résout le porteur UNIQUE de l'alias @production posé par le tournament.
+
+    Contrairement à @champion (un par registered model, arbitre intra-lignée),
+    @production est EXCLUSIF cross-model par design du tournament
+    (promotion_exclusive_best_model_to_production / compare cross-model T.4) :
+    un seul modèle 'rakuten-*' le porte à tout instant.
+
+    ⚠ Lecture des alias : on relit CHAQUE modèle via get_registered_model().
+    Sur la version MLflow de ce projet, search_registered_models() renvoie des
+    RegisteredModel dont le champ .aliases est VIDE (constaté live : l'UI montre
+    @production mais le scan renvoie {}). get_registered_model(name).aliases est
+    la source fiable (même chemin que l'UI). Surcoût : 1 appel/modèle (~10),
+    négligeable devant la latence d'un run predict.
+
+    Args:
+        tracking_uri: URI MLflow. Défaut : env MLFLOW_TRACKING_URI,
+            fallback http://localhost:5000 (même convention que RakutenScorer).
+
+    Returns:
+        (registered_model_name, version) du porteur de @production.
+        La version est retournée pour épinglage immédiat (pattern P4.1 :
+        résoudre UNE fois, charger models:/{name}/{version} — jamais
+        re-résoudre l'alias au moment du load).
+
+    Raises:
+        RuntimeError: 0 porteur (tournament jamais joué / alias supprimé)
+            ou >1 porteurs (invariant d'exclusivité violé — corruption
+            registry, ne PAS choisir silencieusement).
+    """
+    import os  # lazy, même style que RakutenScorer.from_champion
+    if not tracking_uri:
+        tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+
+    client = mlflow.tracking.MlflowClient(tracking_uri)
+
+    holders: list[tuple[str, int]] = []
+    for rm in client.search_registered_models():
+        if not rm.name.startswith("rakuten-"):
+            continue
+        # .aliases fiable uniquement via get_registered_model (cf. docstring)
+        aliases = client.get_registered_model(rm.name).aliases or {}
+        if "production" in aliases:
+            holders.append((rm.name, int(aliases["production"])))
+
+    if not holders:
+        raise RuntimeError(
+            "Aucun registered model 'rakuten-*' ne porte l'alias @production. "
+            "Le tournament (compare cross-model) n'a jamais été joué, ou "
+            "l'alias a été supprimé manuellement du registry."
+        )
+    if len(holders) > 1:
+        raise RuntimeError(
+            f"Invariant violé : @production porté par {len(holders)} modèles "
+            f"({', '.join(f'{n} v{v}' for n, v in holders)}). "
+            f"L'alias est exclusif par design — corriger le registry avant de scorer."
+        )
+
+    name, version = holders[0]
+    logger.info(f"[resolve_production_model] @production → {name} v{version}")
+    return name, version

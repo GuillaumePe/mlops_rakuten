@@ -150,6 +150,7 @@ class RakutenScorer:
         model_name: str,
         tracking_uri: str = "",
         alias: str = "champion",
+        version: int | None = None,
     ) -> "RakutenScorer":
         """
                 Résout l'alias champion du modèle nommé et construit le scorer.
@@ -172,16 +173,28 @@ class RakutenScorer:
         mlflow.set_tracking_uri(tracking_uri)
         client = MlflowClient(tracking_uri)
 
-        # 1. Résoudre @champion
-        try:
-            version_info = client.get_model_version_by_alias(
-                model_name, alias
-            )
-        except Exception as e:
-            raise ValueError(
-                f"Pas de @{alias} pour '{model_name}'. "
-                f"Vérifier le registry MLflow. Cause : {e}"
-            ) from e
+        # 1. Résoudre la cible : version épinglée (P4.1) prioritaire sur alias.
+        #    Pattern @production : resolve_production_model() résout UNE fois,
+        #    on charge ensuite par version — jamais de re-résolution d'alias
+        #    au moment du load (cohérence si promotion concurrente).
+        if version is not None:
+            try:
+                version_info = client.get_model_version(model_name, str(version))
+            except Exception as e:
+                raise ValueError(
+                    f"Version v{version} introuvable pour '{model_name}'. "
+                    f"Vérifier le registry MLflow. Cause : {e}"
+                ) from e
+        else:
+            try:
+                version_info = client.get_model_version_by_alias(
+                    model_name, alias
+                )
+            except Exception as e:
+                raise ValueError(
+                    f"Pas de @{alias} pour '{model_name}'. "
+                    f"Vérifier le registry MLflow. Cause : {e}"
+                ) from e
 
         version = version_info.version
         run_id = version_info.run_id
@@ -394,6 +407,20 @@ class _ScorerM2:
         """
         # 0. Préparer la colonne `text` (concaténation + clean_description)
         raw_df = _prepare_text_column(raw_df)
+
+        # 0bis. Rediriger le dossier images du learner vers celui de raw_df.
+        # M2 reconstruit les chemins depuis learner._image_folder (figé au train
+        # = image_train). Sans ça, toute inférence hors-train (X_test) cherche
+        # dans le mauvais dossier → FileNotFoundError. On aligne sur le parent de
+        # image_path (source de vérité, comme M3 qui la consomme directement).
+        # Hypothèse : un seul dossier par batch (vrai pour X_test → images_test).
+        if (
+            "image_path" in raw_df.columns
+            and len(raw_df)
+            and hasattr(self._image_learner, "_image_folder")
+        ):
+            from pathlib import Path
+            self._image_learner._image_folder = Path(raw_df["image_path"][0]).parent
 
         # 1. Extraire les embeddings via les base learners (bypass pyfunc)
         # extract_embeddings attend un pl.DataFrame avec colonne "text"
