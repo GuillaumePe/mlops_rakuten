@@ -121,3 +121,6 @@ mongo_dump_local/
 data/cache/*.parquet
 data/cache/*.pkl
 docker/airflow/logs/
+.env.*
+tmp/
+apply_*.py
