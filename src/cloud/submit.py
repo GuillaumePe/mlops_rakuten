@@ -211,6 +211,12 @@ def submit_cloud(
         "data/raw_data/images/image_train.tar.zst.dvc",
     ]
     pod_env["DVC_PULL_TARGETS"] = " ".join(targets)
+    # Extraction images train = inutile si l'archive train n'est pas pullée.
+    # Invariant : pas d'archive dans les targets → rien à extraire (générique,
+    # indépendant de l'action). Le run train garde SKIP_IMAGE_EXTRACT=false.
+    pod_env["SKIP_IMAGE_EXTRACT"] = (
+        "false" if any("image_train.tar.zst" in t for t in targets) else "true"
+    )
 
     for key in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "MONGO_URI"):
         if not pod_env[key]:
