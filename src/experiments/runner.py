@@ -1077,7 +1077,7 @@ def main():
     )
     parser.add_argument(
         "--action", required=True,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner","fit_lightning", "submit_cloud", "smoke_tailscale","fetch_logs","hpo_lightning","complete_cache","predict_pending","ingest_batch","rebase_val_selection","reevaluate_actives","eval_gold_champion"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "fit_base_learner","fit_lightning", "submit_cloud", "smoke_tailscale","fetch_logs","hpo_lightning","complete_cache","predict_test_pool","ingest_batch","rebase_val_selection","reevaluate_actives","eval_gold_champion"],
         help="Action à exécuter",
     )
     parser.add_argument(
@@ -1092,7 +1092,7 @@ def main():
     parser.add_argument(
         "--cloud-action",
         default=None,
-        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner","fit_lightning","hpo_lightning","complete_cache","predict_pending","reevaluate_actives","eval_gold_champion"],
+        choices=["prepare_data", "fit", "evaluate", "fit_and_evaluate", "smoke_tailscale","fit_base_learner","fit_lightning","hpo_lightning","complete_cache","predict_test_pool","reevaluate_actives","eval_gold_champion"],
         help="(submit_cloud only) Quelle action le pod cloud doit exécuter",
     )
     parser.add_argument(
@@ -1217,11 +1217,21 @@ def main():
         cmd_smoke_tailscale()
         return
 
-    # predict_pending : action autonome (pas de DataModule/Experiment)
-    if args.action == "predict_pending":
-        from src.models.predict_pending import run_predict_pending
-        result = run_predict_pending(model_name=config.get("model_name", "rakuten-m2-best"))
-        print(f"[Runner] predict_pending result: {result}")
+    # predict_test_pool : score TOUT X_test (pool) sur le @production, GPU.
+    #   action autonome (pas de DataModule/Experiment). Remplace l'ancien
+    #   predict_pending (file X_to_predict abandonnee). model_name=None ->
+    #   resolution @production SUR LE POD (MLflow via Tailscale).
+    #   batch_id via --set ; limit via --limit (None = tout le pool).
+    if args.action == "predict_test_pool":
+        from src.models.predict_test_pool import run_predict_test_pool
+        _bid = config.get("batch_id")
+        batch_id = int(_bid) if _bid is not None else None
+        result = run_predict_test_pool(
+            model_name=None,
+            batch_id=batch_id,
+            limit=config.get("limit"),
+        )
+        print(f"[Runner] predict_test_pool result: {result}")
         return
     if args.action == "ingest_batch":
         batch_id = args.batch or config.get("batch")
@@ -1246,21 +1256,6 @@ def main():
         from src.data.reevaluate_actives import run_reevaluate_actives
         result = run_reevaluate_actives(version=int(version))
         print(f"[Runner] reevaluate_actives result: {result}")
-        return
-    if args.action == "predict_pending":
-        # Forward batch du @production sur la file X_to_predict (GPU, doctrine).
-        # model_name=None → résolution @production SUR LE POD (MLflow via Tailscale).
-        # threshold / batch_id : injectés par le DAG via --set (racine config).
-        from src.models.predict_pending import run_predict_pending
-        threshold = int(config.get("predict_threshold", 50))
-        _bid = config.get("batch_id")
-        batch_id = int(_bid) if _bid is not None else None
-        result = run_predict_pending(
-            threshold=threshold,
-            model_name=None,
-            batch_id=batch_id,
-        )
-        print(f"[Runner] predict_pending result: {result}")
         return
     if args.action == "eval_gold_champion":
         from src.models.eval_gold_champion import run_eval_gold_champion

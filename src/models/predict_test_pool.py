@@ -75,9 +75,11 @@ def run_predict_test_pool(
         {},
         {"_id": 0, "productid": 1, "designation": 1, "description": 1, "imageid": 1},
     )
-    if limit is not None:
+    # ATTENTION Mongo : .limit(0) = AUCUNE limite (pas zéro doc). On ne borne que
+    # si limit > 0 ; limit == 0 → traité comme no-op explicite (0 sample scoré).
+    if limit is not None and int(limit) > 0:
         cursor = cursor.limit(int(limit))
-    pool_docs = list(cursor)
+    pool_docs = [] if (limit is not None and int(limit) == 0) else list(cursor)
 
     if not pool_docs:
         msg = f"{POOL_COLLECTION} vide, no-op."
