@@ -25,6 +25,7 @@ from datetime import timedelta
 from airflow.decorators import dag, task
 from airflow.models.param import Param
 from airflow.operators.empty import EmptyOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.dates import days_ago
 from airflow.models import Variable
 from cloud_task import make_cloud_task
@@ -592,5 +593,24 @@ def training_dag():
 
     tournament_task = tournament()
     join_all >> tournament_task
+
+    # ================================================================ #
+    # P4.5d - Trigger Predict_Y_test (soumission ENS)                  #
+    # En aval du tournament : @production vient d'etre (re)attribue au #
+    # vainqueur cross-model, c'est LUI qui doit scorer X_test.         #
+    # HORS chaine de cycle : ce trigger ne relance pas Ingestion, il   #
+    # produit un livrable. wait_for_completion=False -> Training rend  #
+    # la main tout de suite (le scoring dure ~20-40 min sur pod).      #
+    # batch_id fige dans la conf : la Variable passera a n+1 juste     #
+    # apres, l'estampille des predictions doit rester le batch         #
+    # entraine.                                                        #
+    # ================================================================ #
+    trigger_predict_test = TriggerDagRunOperator(
+        task_id="trigger_predict_y_test",
+        trigger_dag_id="Predict_Y_test",
+        conf={"batch_id": BATCH_ID_JINJA},
+        wait_for_completion=False,
+    )
+    tournament_task >> trigger_predict_test
 
 training_instance = training_dag()

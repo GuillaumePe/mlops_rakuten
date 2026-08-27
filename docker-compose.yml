@@ -86,6 +86,10 @@ x-airflow-common: &airflow-common
   volumes:
     - ./src/airflow/dags:/opt/airflow/dags
     - .:/opt/project:ro 
+    # P4.5d : seul sous-arbre inscriptible du projet (surcharge le :ro parent).
+    # build_submission y ecrit submission_batch{N}.csv ; le reste du code
+    # reste immuable pour le worker Airflow.
+    - ./data/submissions:/opt/project/data/submissions
     - ./docker/airflow/logs:/opt/airflow/logs
     - ./docker/airflow/plugins:/opt/airflow/plugins
     - ./docker/airflow/init:/opt/airflow/init
