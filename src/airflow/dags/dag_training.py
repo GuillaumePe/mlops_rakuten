@@ -546,49 +546,159 @@ def training_dag():
         mlflow.set_tracking_uri(tracking_uri)
         client = mlflow.MlflowClient(tracking_uri)
 
-        best_f1, best_name, best_version, best_alias = -1.0, None, None, None
+        from mlflow.exceptions import MlflowException
 
-        for registry in set(FUSION_REGISTRY.values()):
+        # Cascade conf → params → Variable (identique à compare_promote).
+        # CRITIQUE : la Variable vaut déjà n+1 pendant Training(n).
+        conf = context["dag_run"].conf or {}
+        batch_id = int(
+            conf.get("batch_id")
+            or context["params"].get("batch_id")
+            or Variable.get("batch_id")
+        )
+
+        def _absent(exc: MlflowException) -> bool:
+            """
+            Alias/modèle inexistant (normal) vs panne MLflow (anormal).
+
+            ⚠ MLflow ne signale PAS un alias manquant avec
+            RESOURCE_DOES_NOT_EXIST mais avec :
+                INVALID_PARAMETER_VALUE: Registered model alias X not found.
+            Un code qui suggère une erreur d'appel là où il s'agit d'une
+            absence nominale (@champion_stateful n'existe pas sur toutes les
+            archis). C'est exactement ce que masquait l'ancien
+            `except Exception: continue`.
+
+            On accepte donc les deux codes, mais on exige « not found » dans
+            le message pour INVALID_PARAMETER_VALUE : une panne de tracking
+            ou un modèle inconnu produisent d'autres messages et doivent
+            continuer de remonter — @production détermine ce qui est servi
+            et soumis à l'ENS, l'échec silencieux reste interdit.
+            """
+            code = getattr(exc, "error_code", "") or ""
+            msg = str(exc).lower()
+            if "RESOURCE_DOES_NOT_EXIST" in code:
+                return True
+            return "INVALID_PARAMETER_VALUE" in code and "not found" in msg
+
+        # ------------------------------------------------------------ #
+        # 1. Scan des champions — classement COMPLET, pas seulement le  #
+        #    vainqueur : c'est l'écart entre lignées et entre archis qui #
+        #    porte l'information expérimentale, et il n'existe nulle     #
+        #    part ailleurs (les alias MLflow n'ont pas d'historique).    #
+        # ------------------------------------------------------------ #
+        ranking = []
+        for registry in sorted(set(FUSION_REGISTRY.values())):
             for strategy in STRATEGIES:
                 alias = f"champion_{strategy}"
                 try:
                     mv = client.get_model_version_by_alias(registry, alias)
                     run = client.get_run(mv.run_id)
-                    f1 = run.data.metrics.get("eval_gold/f1_weighted", -1.0)
+                except MlflowException as e:
+                    # Un champion peut légitimement ne pas exister (lignée
+                    # stateful au batch 1). Une PANNE MLflow, non : la laisser
+                    # passer élirait un vainqueur parmi un sous-ensemble
+                    # arbitraire, et @production détermine ce qui est servi ET
+                    # soumis à l'ENS. Échec silencieux interdit ici.
+                    if _absent(e):
+                        print(f"[tournament] {registry}@{alias} absent — ignoré.")
+                        continue
+                    raise
+
+                f1 = run.data.metrics.get("eval_gold/f1_weighted")
+                if f1 is None:
                     print(f"[tournament] {registry}@{alias} v{mv.version} "
-                          f"→ F1={f1:.4f}")
-                    if f1 > best_f1:
-                        best_f1 = f1
-                        best_name = registry
-                        best_version = mv.version
-                        best_alias = alias
-                except Exception:
+                          f"sans eval_gold/f1_weighted — écarté.")
                     continue
 
-        if best_name is None:
+                f1 = float(f1)
+                print(f"[tournament] {registry}@{alias} v{mv.version} → F1={f1:.4f}")
+                ranking.append({
+                    "registry": registry,
+                    "alias": alias,
+                    "strategy": strategy,
+                    "version": int(mv.version),
+                    "f1": f1,
+                })
+
+        ranking.sort(key=lambda d: d["f1"], reverse=True)
+
+        # ------------------------------------------------------------ #
+        # 2. Porteur SORTANT de @production, capturé AVANT suppression.  #
+        #    set_registered_model_alias écrase sans archiver : sans      #
+        #    cette capture, la transition n → n+1 est irrécupérable.     #
+        # ------------------------------------------------------------ #
+        previous = None
+        for registry in sorted(set(FUSION_REGISTRY.values())):
+            try:
+                mv_prod = client.get_model_version_by_alias(registry, "production")
+                previous = f"{registry}@v{mv_prod.version}"
+            except MlflowException as e:
+                if not _absent(e):
+                    raise
+
+        def _log_tournament(winner: dict | None) -> None:
+            """Run MLflow récapitulatif — même rôle que compare_and_promote."""
+            mlflow.set_experiment("training_compare")
+            with mlflow.start_run(run_name=f"tournament_b{batch_id}"):
+                mlflow.set_tag("role", "tournament")
+                mlflow.log_param("batch_id", batch_id)
+                mlflow.log_param("n_candidates", len(ranking))
+                mlflow.log_param("previous_production", previous or "none")
+                for c in ranking:
+                    key = f"ranking/{c['registry']}__{c['strategy']}"
+                    mlflow.log_metric(key, c["f1"])
+                    mlflow.log_param(f"version/{c['registry']}__{c['strategy']}",
+                                     c["version"])
+                if winner is None:
+                    mlflow.log_param("production_set", False)
+                    return
+                mlflow.log_param("production_set", True)
+                mlflow.log_param("winner_model", winner["registry"])
+                mlflow.log_param("winner_version", winner["version"])
+                mlflow.log_param("winner_strategy", winner["strategy"])
+                mlflow.log_metric("production/f1_weighted", winner["f1"])
+                if len(ranking) > 1:
+                    # Marge sur le dauphin : si elle est sous le bruit
+                    # d'échantillonnage du gold (σ_F1 ≈ 0.004), le choix du
+                    # servi n'est pas statistiquement fondé — information
+                    # décisive pour lire la courbe, et perdue sans ce log.
+                    mlflow.log_metric("margin_vs_second",
+                                      winner["f1"] - ranking[1]["f1"])
+
+        if not ranking:
             print("[tournament] Aucun champion trouvé → skip")
+            _log_tournament(None)
             return {"production_set": False}
+
+        best = ranking[0]
 
         # Retirer @production de l'ancien porteur (s'il existe)
         for registry in set(FUSION_REGISTRY.values()):
             try:
                 client.delete_registered_model_alias(registry, "production")
-            except Exception:
-                pass
+            except MlflowException as e:
+                if not _absent(e):
+                    raise
 
         # Poser @production sur le vainqueur [D-T4.4a Option C]
         client.set_registered_model_alias(
-            best_name, "production", best_version
+            best["registry"], "production", best["version"]
         )
-        print(f"[tournament] @production → {best_name} v{best_version} "
-              f"(F1={best_f1:.4f}, source={best_alias})")
+        print(f"[tournament] @production → {best['registry']} v{best['version']} "
+              f"(F1={best['f1']:.4f}, source={best['alias']}) "
+              f"| sortant : {previous or 'aucun'}")
+
+        _log_tournament(best)
 
         return {
             "production_set": True,
-            "model_name": best_name,
-            "version": int(best_version),
-            "f1": best_f1,
-            "source_alias": best_alias,
+            "model_name": best["registry"],
+            "version": int(best["version"]),
+            "f1": best["f1"],
+            "source_alias": best["alias"],
+            "previous_production": previous,
+            "ranking": ranking,
         }
 
     tournament_task = tournament()
