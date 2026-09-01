@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 from src.cloud.base import GPUSpec, JobConfig, JobStatus, VolumeMount
 from src.cloud.exceptions import (
     EXIT_NO_CAPACITY,
+    JobFailedError,
     JobSubmissionError,
     NoCapacityError,
 )
@@ -112,6 +113,84 @@ def _default_trainer_image() -> str:
         )
     user = os.getenv("GITHUB_USER", "guillaumepe").lower()
     return f"ghcr.io/{user}/mlops-rakuten-trainer:{tag}"
+
+
+def _resolve_pod_exit_code(pod_id: str, attempts: int = 6, delay: int = 5) -> int:
+    """
+    Lit le VRAI code de sortie du pod depuis le marqueur R2.
+
+    POURQUOI. RunPodProvider.get_status() renvoie SUCCEEDED dès que le pod est
+    introuvable — or le trap de l'entrypoint self-terminate le pod à la fin,
+    succès comme échec. Tout job remontait donc « succeeded », et le contrat
+    0.c (42 = pénurie retryable, ≠0 = bug fatal) ne pouvait pas fonctionner :
+    aucune erreur survenue PENDANT l'exécution n'atteignait Airflow. Constat
+    mesuré le 2026-09-01 : 10 pods sur 20 sortis en exit1, 100 % des tâches
+    Airflow vertes, 3 fits M2 jamais enregistrés dans MLflow.
+
+    COMMENT. Le trap uploade le log AVANT d'appeler podTerminate et encode le
+    code dans la clé : logs/pod_{pod_id}_{ts}_exit{N}.log. L'information
+    survit donc à la destruction du pod — on la LIT au lieu de la déduire.
+    L'ordre upload-puis-terminate est garanti par l'entrypoint, pas racé ; la
+    boucle ne couvre que la latence de cohérence de R2.
+
+    FAIL-CLOSED. Marqueur absent → 1 (échec fatal), jamais 0. Un pod tué avant
+    son trap (préemption, OOM killer, stop sur timeout) n'écrit rien : le
+    traiter en succès reproduirait exactement le bug corrigé ici. Et pas
+    EXIT_NO_CAPACITY non plus — un retry automatique sur un crash
+    déterministe relancerait 24 pods GPU dans le mur.
+    """
+    import re
+
+    endpoint = os.getenv("R2_ENDPOINT_URL", "")
+    if not endpoint:
+        print("[submit_cloud] R2_ENDPOINT_URL absent → code de sortie non "
+              "vérifiable, échec par défaut.")
+        return 1
+
+    try:
+        import boto3
+    except ImportError:
+        print("[submit_cloud] boto3 absent → code de sortie non vérifiable, "
+              "échec par défaut.")
+        return 1
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=os.getenv("R2_ACCESS_KEY_ID", ""),
+        aws_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY", ""),
+        region_name="auto",
+    )
+    bucket = os.getenv("R2_BUCKET_NAME", "rakuten-mlops-dvc")
+    prefix = f"logs/pod_{pod_id}_"
+    pattern = re.compile(r"_exit(\d+)\.log$")
+
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+        except Exception as e:
+            print(f"[submit_cloud] R2 injoignable ({e}) → échec par défaut.")
+            return 1
+
+        matches = [
+            (k, int(pattern.search(k).group(1)))
+            for k in (o["Key"] for o in resp.get("Contents", []))
+            if pattern.search(k)
+        ]
+        if matches:
+            key, code = sorted(matches)[-1]
+            print(f"[submit_cloud] Marqueur R2 : {key} → exit {code}")
+            return code
+
+        if attempt < attempts:
+            print(f"[submit_cloud] Marqueur absent (essai {attempt}/{attempts}), "
+                  f"attente {delay}s...")
+            time.sleep(delay)
+
+    print(f"[submit_cloud] Aucun marqueur pour {pod_id} après {attempts} essais "
+          f"→ pod tué avant son trap, échec par défaut.")
+    return 1
+
 
 def submit_cloud(
     *,
@@ -310,6 +389,19 @@ def submit_cloud(
         except Exception as stop_err:
             print(f"[submit_cloud] Stop échec : {stop_err}")
         raise
+
+    # ── Code de sortie RÉEL, lu dans R2 — ne PAS le déduire du JobStatus ──
+    # Le pod se self-terminate : get_status() renvoie SUCCEEDED même après un
+    # crash (branche « pod introuvable » de RunPodProvider). Seul le marqueur
+    # R2 dit ce qui s'est réellement passé sur le pod.
+    exit_code = _resolve_pod_exit_code(handle.job_id)
+    if exit_code != 0:
+        raise JobFailedError(
+            f"Pod {handle.job_id} terminé en exit {exit_code} "
+            f"(statut RunPod : {last_status.value} — non fiable). "
+            f"Log R2 : logs/pod_{handle.job_id}_*_exit{exit_code}.log"
+        )
+    print("[submit_cloud] Code de sortie vérifié : 0")
 
     return last_status
 
