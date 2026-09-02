@@ -32,6 +32,10 @@ model:
 trainer:
   max_epochs: 20
   patience: 5
+  # Gain minimal pour reset la patience. Sans lui (defaut Lightning 0.0)
+  # l'early stopping se rearme sur du bruit. Symetrique des base learners
+  # [ADR-003] : meme seuil des deux cotes du zoo.
+  min_delta: 0.002
   precision: "16-mixed"
   accelerator: auto
 

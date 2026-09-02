@@ -109,6 +109,7 @@ class LightningExperiment:
         trainer_cfg = config.get("trainer", {})
         self.max_epochs = trainer_cfg.get("max_epochs", 30)
         self.patience = trainer_cfg.get("patience", 3)
+        self.min_delta = trainer_cfg.get("min_delta", 0.002)
         self.precision = trainer_cfg.get("precision", "16-mixed")
         self.accelerator = trainer_cfg.get("accelerator", "auto")
  
@@ -267,7 +268,7 @@ class LightningExperiment:
         )
  
         callbacks = [
-            EarlyStopping(monitor="val/f1_weighted", patience=self.patience, mode="max", verbose=True,),
+            EarlyStopping(monitor="val/f1_weighted", patience=self.patience, min_delta=self.min_delta, mode="max", verbose=True,),
             ModelCheckpoint(monitor="val/f1_weighted", mode="max", save_top_k=1),
         ]
 
