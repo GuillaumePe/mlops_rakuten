@@ -564,6 +564,17 @@ def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataMod
         **yaml_tags,
         "base_text": bl_cfg["text"]["name"],
         "base_image": bl_cfg["image"]["name"],
+        # Versions ÉPINGLÉES des base learners [D-Phase3 : les fusions
+        # consomment les BL par numéro de version, jamais par alias au
+        # runtime]. Sans ces tags, RakutenScorer._ScorerM2 n'a aucune
+        # information de version et retombe sur @active — le pont legacy
+        # posé UNIQUEMENT par la lignée stateless (BaseLearnerExperiment
+        # 7a-bis). Un champion stateful était donc rechargé avec les
+        # embeddings stateless : la tête de stacking appliquée à une autre
+        # géométrie d'espace. Écarts mesurés au batch 3 : -0.017 (m2-best),
+        # -0.022 (m2-frugal), -0.512 (m2-benchmark).
+        "base_text_version": str(bl_cfg["text"].get("version", "") or ""),
+        "base_image_version": str(bl_cfg["image"].get("version", "") or ""),
         "registry_model_name": promotion_cfg.get("registry_model_name", "rakuten-m2-assembled"),
         "promotion_epsilon": str(promotion_cfg.get("epsilon", 0.005)),
         "promotion_enabled": str(promotion_cfg.get("enabled", True)),
@@ -1154,6 +1165,34 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # ── Logging : sans ceci, TOUS les logger.info des modules sont perdus ──
+    # Les modules (BaseLearnerExperiment, RakutenDataModule, utils...) émettent
+    # via logging.getLogger(__name__). Sans handler racine configuré, le niveau
+    # par défaut de la racine est WARNING : rien n'est émis, seuls les print()
+    # remontent. Diagnostic du 2026-09-01 mené à l'aveugle sur le bloc de
+    # promotion (étapes 7a/7c invisibles dans les logs pods R2) faute de ceci.
+    #
+    # force=True : écrase toute config posée par une lib importée avant nous
+    # (mlflow/lightning appellent basicConfig au premier import ; sans force,
+    # notre appel serait un no-op silencieux — exactement le piège d'origine).
+    # stream=stdout : le trap de l'entrypoint capture stdout vers le log R2.
+    import logging  # local : évite un 2e hunk sur le bloc d'imports
+    logging.basicConfig(
+        level=os.getenv("RAKUTEN_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)-7s [%(name)s] %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+        force=True,
+    )
+    # Les libs réseau en INFO noieraient le signal (un log par requête S3/HTTP).
+    for _noisy in ("botocore", "boto3", "s3transfer", "urllib3", "matplotlib",
+                   "PIL", "fsspec", "filelock"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
+    logging.getLogger(__name__).info(
+        "Logging initialisé (niveau=%s)",
+        logging.getLevelName(logging.getLogger().level),
+    )
 
     # Charger la config
     config = load_config(args.experiment)
