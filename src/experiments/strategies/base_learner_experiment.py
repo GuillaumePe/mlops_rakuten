@@ -397,6 +397,46 @@ class BaseLearnerExperiment:
             mlflow.log_metric(f"{prefix}/accuracy", acc)
             mlflow.log_metric(f"{prefix}/log_loss", ll)
             mlflow.log_metric(f"{prefix}/ece", ece)
+
+            # ---- Décomposition par batch d'origine [ADR-003 §6.3] ---- #
+            # val_selection est un MÉLANGE HISTORIQUE (~10 % de chaque batch).
+            # Le F1 global mesure la performance CUMULÉE ; la décomposition
+            # rend visible l'oubli par lignée et rend CALCULABLE un critère
+            # de promotion pondéré vers le récent.
+            #
+            # ⚠ Ne pas omettre. Coût nul (y_pred est déjà calculé, on masque),
+            # mais ces métriques doivent être écrites AU MOMENT DU FIT : sans
+            # elles, rejouer la porte de promotion sur un autre critère
+            # exigerait de refaire les fits — l'@active choisi détermine les
+            # embeddings, donc les fusions. Non reconstructible a posteriori.
+            df_vs = getattr(datamodule, "_df_val_selection", None)
+            if df_vs is not None and "batch_id" in df_vs.columns:
+                b_ids = df_vs["batch_id"].to_numpy()
+                if len(b_ids) == len(y_vs):
+                    for b in sorted({int(x) for x in b_ids}):
+                        mask = (b_ids == b)
+                        if not mask.any():
+                            continue
+                        mlflow.log_metric(
+                            f"{prefix}/f1_weighted__batch{b}",
+                            f1_score(y_vs[mask], y_pred[mask], average="weighted"),
+                        )
+                        mlflow.log_metric(f"{prefix}/n__batch{b}", int(mask.sum()))
+                    logger.info(
+                        "  %s : décomposition par batch loggée (%d batches)",
+                        prefix, len({int(x) for x in b_ids}),
+                    )
+                else:
+                    logger.warning(
+                        "  %s : batch_id désaligné (%d vs %d) — décomposition "
+                        "par batch IGNORÉE.", prefix, len(b_ids), len(y_vs),
+                    )
+            else:
+                logger.warning(
+                    "  %s : batch_id absent de _df_val_selection — "
+                    "décomposition par batch IGNORÉE.", prefix,
+                )
+
             logger.info(
                 f"  {prefix} : f1_w={f1_w:.4f} f1_m={f1_m:.4f} "
                 f"acc={acc:.4f} log_loss={ll:.4f} ece={ece:.4f}"

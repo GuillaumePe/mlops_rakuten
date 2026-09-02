@@ -166,9 +166,14 @@ def run_reevaluate_actives(
                 key = f"{name}:v{model_version}"
 
                 try:
-                    f1 = _evaluate_learner(name, model_version, df_val, y_val)
+                    f1, per_batch = _evaluate_learner(
+                        name, model_version, df_val, y_val
+                    )
                     results[key] = {
                         "f1_weighted": round(f1, 4),
+                        "f1_weighted_per_batch": {
+                            b: round(v, 4) for b, v in per_batch.items()
+                        },
                         "version": model_version,
                         "run_id": run_id,
                         "aliases": info["aliases"],
@@ -176,6 +181,15 @@ def run_reevaluate_actives(
 
                     # Log sur le run d'origine
                     client_mlflow.log_metric(run_id, metric_key, f1)
+                    # Pendant obligatoire de la décomposition côté challengers
+                    # [ADR-003 §6.3] : sans elle, la métrique par batch
+                    # n'existerait que d'un seul côté de la comparaison
+                    # titulaire/challenger, et la porte de promotion
+                    # contrefactuelle serait incalculable.
+                    for b, v in per_batch.items():
+                        client_mlflow.log_metric(
+                            run_id, f"{metric_key}__batch{b}", v
+                        )
                     logger.info(
                         f"  {name} v{model_version} @{info['aliases']} : {metric_key}={f1:.4f} "
                         f"(loggé sur run {run_id[:8]}...)"
@@ -272,4 +286,29 @@ def _evaluate_learner(
     # y_pred contient des indices (0-26) depuis predict_proba.argmax
     y_val_encoded = np.array(encode_labels(y_val))
 
-    return f1_score(y_val_encoded, y_pred, average="weighted")
+    f1_global = f1_score(y_val_encoded, y_pred, average="weighted")
+
+    # Décomposition par batch d'origine [ADR-003 §6.3]. Coût nul : y_pred est
+    # déjà calculé. Symétrique de BaseLearnerExperiment §4 — les deux côtés de
+    # la comparaison titulaire/challenger doivent porter la même métrique.
+    per_batch: dict[int, float] = {}
+    if "batch_id" in df_val.columns:
+        b_ids = df_val["batch_id"].to_numpy()
+        if len(b_ids) == len(y_val_encoded):
+            for b in sorted({int(x) for x in b_ids}):
+                mask = (b_ids == b)
+                if mask.any():
+                    per_batch[b] = float(
+                        f1_score(
+                            y_val_encoded[mask], y_pred[mask], average="weighted"
+                        )
+                    )
+        else:
+            logger.warning(
+                "    batch_id désaligné (%d vs %d) — décomposition ignorée.",
+                len(b_ids), len(y_val_encoded),
+            )
+    else:
+        logger.warning("    batch_id absent de df_val — décomposition ignorée.")
+
+    return f1_global, per_batch

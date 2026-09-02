@@ -1,0 +1,73 @@
+--- a/src/models/rakuten_scorer.py
++++ b/src/models/rakuten_scorer.py
+@@ -335,6 +335,8 @@
+ # filler 335
+         self._text_name: str = ""
+         self._image_name: str = ""
++        self._text_version: str = ""
++        self._image_version: str = ""
+ # filler 338
+ # filler 339
+ # filler 340
+@@ -359,27 +361,55 @@
+         # 2. Identifier les base learners depuis les tags
+         self._text_name = self.meta.get("base_text", "")
+         self._image_name = self.meta.get("base_image", "")
++        self._text_version = str(self.meta.get("base_text_version", "") or "")
++        self._image_version = str(self.meta.get("base_image_version", "") or "")
+         if not self._text_name or not self._image_name:
+             raise ValueError(
+                 f"Tags 'base_text'/'base_image' manquants pour "
+                 f"{self.model_name} v{self.model_version}. "
+                 f"Tags disponibles : {list(self.meta.keys())}"
+             )
+-        # 3. Charger les base learners et extraire le learner sous-jacent
++        if not self._text_version or not self._image_version:
++            # FAIL-FAST délibéré. L'ancien code résolvait ici alias="active",
++            # pont legacy posé UNIQUEMENT par la lignée stateless
++            # (BaseLearnerExperiment 7a-bis). Un champion stateful était donc
++            # rechargé avec les embeddings STATELESS : tête de stacking
++            # appliquée à une autre géométrie d'espace. Train/serve skew
++            # silencieux, mesuré au batch 3 à -0.017 (m2-best), -0.022
++            # (m2-frugal), -0.512 (m2-benchmark). Le résultat alimentait
++            # @production ET les soumissions ENS : une erreur bruyante vaut
++            # mieux qu'un score faux.
++            raise ValueError(
++                f"Tags 'base_text_version'/'base_image_version' manquants pour "
++                f"{self.model_name} v{self.model_version}. Reconstruction "
++                f"impossible sans skew : les base learners doivent être "
++                f"épinglés par VERSION, pas résolus par alias. Champion "
++                f"antérieur au correctif → à réentraîner. "
++                f"Tags disponibles : {sorted(self.meta.keys())}"
++            )
++        # 3. Charger les base learners aux versions ÉPINGLÉES du fit
+         self._text_learner = self._load_learner(
+-            f"rakuten-base-{self._text_name}", alias="active"
++            f"rakuten-base-{self._text_name}", version=self._text_version
+         )
+         self._image_learner = self._load_learner(
+-            f"rakuten-base-{self._image_name}", alias="active"
++            f"rakuten-base-{self._image_name}", version=self._image_version
+         )
+         logger.info(
+             f"[_ScorerM2] Prêt : text={self._text_name}, "
+             f"image={self._image_name}"
+         )
+     @staticmethod
+-    def _load_learner(registered_name: str, alias: str):
+-        """Charge un base learner pyfunc puis extrait le BaseLearner sous-jacent."""
+-        uri = f"models:/{registered_name}@{alias}"
++    def _load_learner(registered_name: str, version: str):
++        """
++        Charge un base learner pyfunc à une VERSION explicite, puis extrait le
++        BaseLearner sous-jacent.
++
++        Résolution par version et non par alias : un alias est un pointeur
++        mutable partagé entre lignées, la version est immuable. Seule façon de
++        garantir que les embeddings d'inférence viennent du même encodeur que
++        ceux du fit.
++        """
++        uri = f"models:/{registered_name}/{version}"
+         logger.info(f"[_ScorerM2] Chargement base learner : {uri}")
+         pyfunc = mlflow.pyfunc.load_model(uri)
+ # filler 386

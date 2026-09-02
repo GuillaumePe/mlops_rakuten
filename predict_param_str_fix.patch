@@ -1,0 +1,17 @@
+--- a/src/airflow/dags/dag_predict_test.py
++++ b/src/airflow/dags/dag_predict_test.py
+@@ -70,7 +70,13 @@
+     params={
+         "batch_id": Param(
+             None,
+-            type=["null", "integer"],
++            # "string" accepté volontairement : Jinja rend TOUJOURS du texte,
++            # sauf si le DAG appelant déclare render_template_as_native_obj.
++            # dag_ingestion l'a, dag_training ne l'a pas — son trigger envoie
++            # donc conf={"batch_id": "3"} et un Param strictement integer
++            # rejette le run AVANT toute exécution. Les consommateurs font
++            # int() de leur côté (check_production, override YAML du pod).
++            type=["null", "integer", "string"],
+             description=(
+                 "Batch venant d'être entraîné. None → Variable Airflow "
+                 "`batch_id` (⚠ déjà à n+1 pendant Training(n))."

@@ -1,0 +1,33 @@
+--- a/src/airflow/dags/dag_training.py
++++ b/src/airflow/dags/dag_training.py
+@@ -558,9 +558,28 @@
+         )
+ 
+         def _absent(exc: MlflowException) -> bool:
+-            """Alias/modèle inexistant (normal) vs panne MLflow (anormal)."""
++            """
++            Alias/modèle inexistant (normal) vs panne MLflow (anormal).
++
++            ⚠ MLflow ne signale PAS un alias manquant avec
++            RESOURCE_DOES_NOT_EXIST mais avec :
++                INVALID_PARAMETER_VALUE: Registered model alias X not found.
++            Un code qui suggère une erreur d'appel là où il s'agit d'une
++            absence nominale (@champion_stateful n'existe pas sur toutes les
++            archis). C'est exactement ce que masquait l'ancien
++            `except Exception: continue`.
++
++            On accepte donc les deux codes, mais on exige « not found » dans
++            le message pour INVALID_PARAMETER_VALUE : une panne de tracking
++            ou un modèle inconnu produisent d'autres messages et doivent
++            continuer de remonter — @production détermine ce qui est servi
++            et soumis à l'ENS, l'échec silencieux reste interdit.
++            """
+             code = getattr(exc, "error_code", "") or ""
+-            return "RESOURCE_DOES_NOT_EXIST" in (code + str(exc))
++            msg = str(exc).lower()
++            if "RESOURCE_DOES_NOT_EXIST" in code:
++                return True
++            return "INVALID_PARAMETER_VALUE" in code and "not found" in msg
+ 
+         # ------------------------------------------------------------ #
+         # 1. Scan des champions — classement COMPLET, pas seulement le  #

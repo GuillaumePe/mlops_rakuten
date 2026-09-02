@@ -1,0 +1,122 @@
+--- a/src/experiments/strategies/base_learner_experiment.py
++++ b/src/experiments/strategies/base_learner_experiment.py
+@@ -520,14 +520,13 @@
+ # filler 520
+                     # EXCLUSIF partagé entre lignées → contamination.
+  
+-                    # 7c. Write cache parquet (UNIQUEMENT si promu — invariant M.4bis)
+-                    logger.info(
+-                        "[BaseLearnerExperiment.7c] Extract embeddings + write cache parquet"
+-                    )
+-                    self._write_cache_parquet(
+-                        datamodule, source_model_version=latest_version
+-                    )
+-                    logger.info("[BaseLearnerExperiment.7c] ✓ Cache parquet écrit")
++                    # 7c. DÉPLACÉ EN 8 : le cache parquet est désormais
++                    # écrit INCONDITIONNELLEMENT. L'invariant M.4bis « cache
++                    # écrit uniquement si promu » bloquait le pipeline dès que
++                    # les modèles cessaient de progresser — au batch 3
++                    # (2026-09-01) : 0 promotion sur 8 base learners, donc
++                    # aucun cache _v3, donc 6 fusions mortes sur
++                    # FileNotFoundError.
+                     promotion_success = True
+  
+                 except Exception as e:
+@@ -544,10 +543,95 @@
+                 mlflow.log_param("promotion_success", promotion_success)
+             else:
+                 logger.info(
+-                    f"[BaseLearnerExperiment.7] Non promu (gain < {threshold}). "
+-                    f"Cache parquet conservé tel quel."
++                    "[BaseLearnerExperiment.7] Non promu : gain < seuil=%.4f. "
++                    "@%s reste sur sa version courante.",
++                    threshold, promotion_alias,
++                )
++
++            # ========================================================== #
++            # 8. Cache parquet — INCONDITIONNEL, aligné sur @active       #
++            # ========================================================== #
++            # INCONDITIONNEL : _write_cache_parquet extrait sur _df_full, qui
++            # couvre les batches 1..n. Un cache produit au batch n-1 ne
++            # contient PAS les productids du batch n → l'inner join du
++            # DataModule les droperait silencieusement. Une passe forward est
++            # donc nécessaire à chaque batch, promotion ou non : l'ancien
++            # invariant n'économisait rien, il cassait le pipeline.
++            #
++            # ALIGNÉ SUR @active : le garde-fou M.7 du DataModule vérifie que
++            # source_model_version == version portée par l'alias. Écrire les
++            # embeddings d'un challenger non promu ferait échouer ce contrôle
++            # — et le contourner recréerait le train/serve skew corrigé dans
++            # RakutenScorer (features issues d'un modèle qui n'est pas celui
++            # épinglé par le DAG).
++            logger.info("[BaseLearnerExperiment.8] Cache parquet (inconditionnel)")
++            try:
++                active_mv = client.get_model_version_by_alias(
++                    registered_model_name, promotion_alias
++                )
++                active_version = int(active_mv.version)
++            except Exception:
++                # Aucun @active : démarrage de lignée, le modèle courant fait
++                # référence.
++                active_version = latest_version
++
++            if active_version == latest_version:
++                logger.info(
++                    "[BaseLearnerExperiment.8] @%s = v%d = modèle courant → "
++                    "extraction depuis le learner en mémoire",
++                    promotion_alias, active_version,
+                 )
++                source_learner = self._learner
++            else:
++                logger.info(
++                    "[BaseLearnerExperiment.8] @%s = v%d ≠ courant v%d → "
++                    "rechargement du porteur de l'alias",
++                    promotion_alias, active_version, latest_version,
++                )
++                source_learner = self._load_learner_version(
++                    registered_model_name, active_version
++                )
++
++            # try/finally : restaure l'instance d'origine même si l'extraction
++            # échoue, sinon self._learner resterait incohérent pour la suite.
++            previous_learner = self._learner
++            try:
++                self._learner = source_learner
++                self._write_cache_parquet(
++                    datamodule, source_model_version=active_version
++                )
++            finally:
++                self._learner = previous_learner
++            logger.info(
++                "[BaseLearnerExperiment.8] ✓ Cache parquet écrit (source v%d)",
++                active_version,
++            )
++
++
++    @staticmethod
++    def _load_learner_version(registered_model_name: str, version: int):
++        """
++        Recharge un base learner à une VERSION explicite depuis le registry.
+ 
++        Utilisé quand le challenger n'est pas promu : le cache parquet doit
++        refléter le porteur de @active, pas le modèle qu'on vient d'entraîner.
++        Même chemin que RakutenScorer._load_learner (bypass de la couche
++        pyfunc pour atteindre le BaseLearner sous-jacent).
++        """
++        uri = f"models:/{registered_model_name}/{version}"
++        logger.info("[_load_learner_version] Chargement %s", uri)
++        pyfunc = mlflow.pyfunc.load_model(uri)
++        python_model = getattr(
++            getattr(pyfunc, "_model_impl", None), "python_model", None
++        )
++        if python_model is None:
++            raise RuntimeError(f"Pas de python_model sous-jacent pour {uri}")
++        learner = getattr(python_model, "learner", None)
++        if learner is None:
++            raise RuntimeError(f"BaseLearnerPyfunc.learner est None pour {uri}")
++        from src.models.utils import ensure_device
++        ensure_device(learner)
++        return learner
+ 
+     def _write_cache_parquet(
+         self,
