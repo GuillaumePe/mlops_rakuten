@@ -1,0 +1,42 @@
+--- a/src/experiments/strategies/base_learner_experiment.py
++++ b/src/experiments/strategies/base_learner_experiment.py
+@@ -156,6 +156,7 @@
+                 lr=float(cfg.get("lr", 1e-3)),
+                 weight_decay=float(cfg.get("weight_decay", 0.0)),
+                 patience=cfg.get("patience", 3),
++                min_delta=float(cfg.get("min_delta", 0.002)),
+                 # Ces 5 paramètres étaient ABSENTS de l'appel : les défauts de
+                 # la signature TextCNN s'appliquaient à la place du YAML.
+                 # Seul max_epochs divergeait réellement (15 par défaut contre
+@@ -179,6 +180,7 @@
+                 batch_size=cfg.get("batch_size", 32),
+                 max_epochs=cfg.get("max_epochs", 15),
+                 patience=cfg.get("patience", 3),
++                min_delta=float(cfg.get("min_delta", 0.002)),
+                 lr_head=float(cfg.get("lr_head", 1e-3)),
+                 lr_backbone=float(cfg.get("lr_backbone", 1e-5)),
+                 weight_decay=float(cfg.get("weight_decay", 1e-4)),
+@@ -197,6 +199,7 @@
+                 batch_size=cfg.get("batch_size", 32),
+                 max_epochs=cfg.get("max_epochs", 10),
+                 patience=cfg.get("patience", 2),
++                min_delta=float(cfg.get("min_delta", 0.002)),
+                 lr_lora=float(cfg.get("lr_lora", 5e-4)),
+             ),
+             "resnet18_full_ft": lambda cfg: ResNet18FullFT(
+@@ -205,6 +208,7 @@
+                 batch_size=cfg.get("batch_size", 32),
+                 max_epochs=cfg.get("max_epochs", 15),
+                 patience=cfg.get("patience", 3),
++                min_delta=float(cfg.get("min_delta", 0.002)),
+                 lr_head=float(cfg.get("lr_head", 1e-3)),
+                 lr_backbone=float(cfg.get("lr_backbone", 1e-5)),
+                 weight_decay=float(cfg.get("weight_decay", 1e-2)),
+@@ -215,6 +219,7 @@
+                 batch_size=cfg.get("batch_size", 64),
+                 max_epochs=cfg.get("max_epochs", 15),
+                 patience=cfg.get("patience", 3),
++                min_delta=float(cfg.get("min_delta", 0.002)),
+                 lr_head=float(cfg.get("lr_head", 1e-3)),
+                 lr_lora=float(cfg.get("lr_lora", 1e-4)),
+             ),

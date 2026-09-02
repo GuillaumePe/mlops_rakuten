@@ -16,8 +16,12 @@ learner:
   config:
     n_classes: 27
     batch_size: 64
-    max_epochs: 15
+    max_epochs: 25
     patience: 4
+    # Gain minimal pour reset la patience. Sans lui (defaut Lightning 0.0)
+    # l'early stopping se rearme sur du bruit : SigLIP2 batch 1 a enchaine
+    # 6 gains de 0.001 et epuise son plafond d'epoques pour rien.
+    min_delta: 0.002
     lr_head: 1.0e-3
     lr_backbone: 1.0e-5
     weight_decay: 1e-2

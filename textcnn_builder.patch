@@ -1,0 +1,25 @@
+--- a/src/experiments/strategies/base_learner_experiment.py
++++ b/src/experiments/strategies/base_learner_experiment.py
+@@ -156,6 +156,22 @@
+                 lr=float(cfg.get("lr", 1e-3)),
+                 weight_decay=float(cfg.get("weight_decay", 0.0)),
+                 patience=cfg.get("patience", 3),
++                # Ces 5 paramètres étaient ABSENTS de l'appel : les défauts de
++                # la signature TextCNN s'appliquaient à la place du YAML.
++                # Seul max_epochs divergeait réellement (15 par défaut contre
++                # 20 déclarés) — les autres coïncidaient par chance, ce qui
++                # rendait le bug invisible. batch_size/random_state/precision
++                # sont explicités pour que la coïncidence ne soit plus une
++                # dépendance tacite.
++                # max_len : jamais transmis ni déclaré, TextCNN tronquait donc
++                # à 128 tokens (défaut classe) là où CamemBERT lit 300. Rendu
++                # explicite sans changer la valeur, pour ne pas casser la
++                # comparabilité avec les runs antérieurs.
++                max_epochs=cfg.get("max_epochs", 15),
++                batch_size=cfg.get("batch_size", 64),
++                max_len=cfg.get("max_len", 128),
++                random_state=cfg.get("random_state", 42),
++                precision=cfg.get("precision", "bf16-mixed"),
+             ),
+ # filler 160
+ # filler 161

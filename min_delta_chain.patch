@@ -1,0 +1,160 @@
+--- a/src/models/base_learners/text/textcnn.py
++++ b/src/models/base_learners/text/textcnn.py
+@@ -313,6 +313,13 @@
+ # filler 313
+ # filler 314
+         patience: int = 2,
++        # Seuil de significativite de l'early stopping. Lightning met
++        # min_delta=0.0 par defaut : la patience se rearme sur un gain
++        # de 0.0005, donc sur du bruit (SigLIP2 batch 1 : 6 "ameliorations"
++        # de 0.001 consecutives, plafond d'epoques epuise pour rien).
++        # 0.002 ~ moitie de l'ecart-type d'echantillonnage du F1 pondere
++        # sur une validation de 3k-10k samples (sigma ~ 0.004-0.005).
++        min_delta: float = 0.002,
+ # filler 316
+ # filler 317
+ # filler 318
+@@ -329,6 +336,7 @@
+ # filler 329
+ # filler 330
+         self._patience = patience
++        self._min_delta = min_delta
+ # filler 332
+ # filler 333
+ # filler 334
+@@ -512,6 +520,7 @@
+                  monitor="val_f1_weighted",
+                  mode="max",
+                 patience=self._patience,
++                min_delta=self._min_delta,
+                 verbose=True,
+             ),
+         ]
+--- a/src/models/base_learners/text/camembert_lora.py
++++ b/src/models/base_learners/text/camembert_lora.py
+@@ -369,6 +369,13 @@
+ # filler 369
+ # filler 370
+         patience: int = 2,
++        # Seuil de significativite de l'early stopping. Lightning met
++        # min_delta=0.0 par defaut : la patience se rearme sur un gain
++        # de 0.0005, donc sur du bruit (SigLIP2 batch 1 : 6 "ameliorations"
++        # de 0.001 consecutives, plafond d'epoques epuise pour rien).
++        # 0.002 ~ moitie de l'ecart-type d'echantillonnage du F1 pondere
++        # sur une validation de 3k-10k samples (sigma ~ 0.004-0.005).
++        min_delta: float = 0.002,
+ # filler 372
+ # filler 373
+ # filler 374
+@@ -387,6 +394,7 @@
+ # filler 387
+ # filler 388
+         self._patience = patience
++        self._min_delta = min_delta
+ # filler 390
+ # filler 391
+ # filler 392
+@@ -560,6 +568,7 @@
+                 monitor="val_f1_weighted",
+                 mode="max",
+                 patience=self._patience,
++                min_delta=self._min_delta,
+                 verbose=True,
+             ),
+         ]
+--- a/src/models/base_learners/image/siglip2.py
++++ b/src/models/base_learners/image/siglip2.py
+@@ -318,6 +318,13 @@
+ # filler 318
+ # filler 319
+         patience: int = 3,
++        # Seuil de significativite de l'early stopping. Lightning met
++        # min_delta=0.0 par defaut : la patience se rearme sur un gain
++        # de 0.0005, donc sur du bruit (SigLIP2 batch 1 : 6 "ameliorations"
++        # de 0.001 consecutives, plafond d'epoques epuise pour rien).
++        # 0.002 ~ moitie de l'ecart-type d'echantillonnage du F1 pondere
++        # sur une validation de 3k-10k samples (sigma ~ 0.004-0.005).
++        min_delta: float = 0.002,
+ # filler 321
+ # filler 322
+ # filler 323
+@@ -339,6 +346,7 @@
+ # filler 339
+ # filler 340
+         self._patience = patience
++        self._min_delta = min_delta
+ # filler 342
+ # filler 343
+ # filler 344
+@@ -499,6 +507,7 @@
+                 monitor="val_f1_weighted",
+                 mode="max",
+                 patience=self._patience,
++                min_delta=self._min_delta,
+                 verbose=True,
+             ),
+         ]
+--- a/src/models/base_learners/image/resnet18_full_ft.py
++++ b/src/models/base_learners/image/resnet18_full_ft.py
+@@ -367,6 +367,13 @@
+ # filler 367
+ # filler 368
+         patience: int = 3,
++        # Seuil de significativite de l'early stopping. Lightning met
++        # min_delta=0.0 par defaut : la patience se rearme sur un gain
++        # de 0.0005, donc sur du bruit (SigLIP2 batch 1 : 6 "ameliorations"
++        # de 0.001 consecutives, plafond d'epoques epuise pour rien).
++        # 0.002 ~ moitie de l'ecart-type d'echantillonnage du F1 pondere
++        # sur une validation de 3k-10k samples (sigma ~ 0.004-0.005).
++        min_delta: float = 0.002,
+ # filler 370
+ # filler 371
+ # filler 372
+@@ -382,6 +389,7 @@
+ # filler 382
+ # filler 383
+         self._patience = patience
++        self._min_delta = min_delta
+ # filler 385
+ # filler 386
+ # filler 387
+@@ -550,6 +558,7 @@
+                 monitor="val_f1_weighted",
+                 mode="max",
+                 patience=self._patience,
++                min_delta=self._min_delta,
+                 verbose=True,
+             ),
+         ]
+--- a/src/models/base_learners/image/resnet50_partial_ft.py
++++ b/src/models/base_learners/image/resnet50_partial_ft.py
+@@ -329,6 +329,13 @@
+ # filler 329
+ # filler 330
+         patience: int = 3,
++        # Seuil de significativite de l'early stopping. Lightning met
++        # min_delta=0.0 par defaut : la patience se rearme sur un gain
++        # de 0.0005, donc sur du bruit (SigLIP2 batch 1 : 6 "ameliorations"
++        # de 0.001 consecutives, plafond d'epoques epuise pour rien).
++        # 0.002 ~ moitie de l'ecart-type d'echantillonnage du F1 pondere
++        # sur une validation de 3k-10k samples (sigma ~ 0.004-0.005).
++        min_delta: float = 0.002,
+ # filler 332
+ # filler 333
+ # filler 334
+@@ -344,6 +351,7 @@
+ # filler 344
+ # filler 345
+         self._patience = patience
++        self._min_delta = min_delta
+ # filler 347
+ # filler 348
+ # filler 349
+@@ -513,6 +521,7 @@
+                  monitor="val_f1_weighted",
+                  mode="max",
+                 patience=self._patience,
++                min_delta=self._min_delta,
+                 verbose=True,
+             ),
+         ]

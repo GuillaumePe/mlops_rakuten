@@ -1,0 +1,88 @@
+--- a/src/experiments/config/base_learner_textcnn.yaml
++++ b/src/experiments/config/base_learner_textcnn.yaml
+@@ -24,11 +24,16 @@
+ # filler 24
+ # filler 25
+ # filler 26
+-    max_epochs: 20
++    max_epochs: 40   # releve : avec min_delta c'est la patience qui doit trancher, pas le plafond
+ # filler 28
+ # filler 29
+ # filler 30
+     patience: 4
++    # Gain minimal pour reset la patience. Sans lui (defaut Lightning 0.0)
++    # l'early stopping se rearme sur du bruit : SigLIP2 batch 1 a enchaine
++    # 6 gains de 0.001 et epuise son plafond d'epoques pour rien.
++    # 0.002 ~ moitie du sigma d'echantillonnage du F1 pondere (3k-10k samples).
++    min_delta: 0.002
+     random_state: 42
+ # filler 33
+ # filler 34
+--- a/src/experiments/config/base_learner_camembert_lora.yaml
++++ b/src/experiments/config/base_learner_camembert_lora.yaml
+@@ -19,8 +19,13 @@
+ # filler 19
+ # filler 20
+ # filler 21
+-    max_epochs: 10
++    max_epochs: 20   # releve : avec min_delta c'est la patience qui doit trancher, pas le plafond
+     patience: 3
++    # Gain minimal pour reset la patience. Sans lui (defaut Lightning 0.0)
++    # l'early stopping se rearme sur du bruit : SigLIP2 batch 1 a enchaine
++    # 6 gains de 0.001 et epuise son plafond d'epoques pour rien.
++    # 0.002 ~ moitie du sigma d'echantillonnage du F1 pondere (3k-10k samples).
++    min_delta: 0.002
+     lr_lora: 2.0e-4
+ # filler 25
+ # filler 26
+--- a/src/experiments/config/base_learner_siglip2.yaml
++++ b/src/experiments/config/base_learner_siglip2.yaml
+@@ -23,8 +23,13 @@
+ # filler 23
+ # filler 24
+ # filler 25
+-    max_epochs: 15
++    max_epochs: 25   # releve : avec min_delta c'est la patience qui doit trancher, pas le plafond
+     patience: 3                   # early stopping sur val_f1_weighted
++    # Gain minimal pour reset la patience. Sans lui (defaut Lightning 0.0)
++    # l'early stopping se rearme sur du bruit : SigLIP2 batch 1 a enchaine
++    # 6 gains de 0.001 et epuise son plafond d'epoques pour rien.
++    # 0.002 ~ moitie du sigma d'echantillonnage du F1 pondere (3k-10k samples).
++    min_delta: 0.002
+     lr_head: 1.0e-3               # tête random -> LR élevé
+ # filler 29
+ # filler 30
+--- a/src/experiments/config/base_learner_resnet18_full_ft.yaml
++++ b/src/experiments/config/base_learner_resnet18_full_ft.yaml
+@@ -13,8 +13,13 @@
+ # filler 13
+ # filler 14
+ # filler 15
+-    max_epochs: 15
++    max_epochs: 25   # releve : avec min_delta c'est la patience qui doit trancher, pas le plafond
+     patience: 3                 # couper plus tôt (overfitting dès epoch 4)
++    # Gain minimal pour reset la patience. Sans lui (defaut Lightning 0.0)
++    # l'early stopping se rearme sur du bruit : SigLIP2 batch 1 a enchaine
++    # 6 gains de 0.001 et epuise son plafond d'epoques pour rien.
++    # 0.002 ~ moitie du sigma d'echantillonnage du F1 pondere (3k-10k samples).
++    min_delta: 0.002
+     lr_head: 1.0e-3             # head random → LR élevé
+ # filler 19
+ # filler 20
+--- a/src/experiments/config/base_learner_resnet50_partial_ft.yaml
++++ b/src/experiments/config/base_learner_resnet50_partial_ft.yaml
+@@ -16,8 +16,13 @@
+ # filler 16
+ # filler 17
+ # filler 18
+-    max_epochs: 15
++    max_epochs: 25   # releve : avec min_delta c'est la patience qui doit trancher, pas le plafond
+     patience: 4
++    # Gain minimal pour reset la patience. Sans lui (defaut Lightning 0.0)
++    # l'early stopping se rearme sur du bruit : SigLIP2 batch 1 a enchaine
++    # 6 gains de 0.001 et epuise son plafond d'epoques pour rien.
++    # 0.002 ~ moitie du sigma d'echantillonnage du F1 pondere (3k-10k samples).
++    min_delta: 0.002
+     lr_head: 1.0e-3
+ # filler 22
+ # filler 23

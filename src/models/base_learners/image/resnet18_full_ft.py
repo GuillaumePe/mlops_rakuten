@@ -367,6 +367,13 @@ class ResNet18FullFT(BaseLearner):
         batch_size: int = 32,
         max_epochs: int = 15,
         patience: int = 3,
+        # Seuil de significativite de l'early stopping. Lightning met
+        # min_delta=0.0 par defaut : la patience se rearme sur un gain de
+        # 0.0005, donc sur du bruit (SigLIP2 batch 1 : 6 "ameliorations"
+        # de 0.001 consecutives, plafond d'epoques epuise pour rien).
+        # 0.002 ~ moitie du sigma d'echantillonnage du F1 pondere sur une
+        # validation de 3k-10k samples (sigma ~ 0.004-0.005).
+        min_delta: float = 0.002,
         lr_head: float = 1e-3,
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
@@ -382,6 +389,7 @@ class ResNet18FullFT(BaseLearner):
         self._batch_size = batch_size
         self._max_epochs = max_epochs
         self._patience = patience
+        self._min_delta = min_delta
         self._lr_head = lr_head
         self._lr_backbone = lr_backbone
         self._weight_decay = weight_decay
@@ -550,6 +558,7 @@ class ResNet18FullFT(BaseLearner):
                 monitor="val_f1_weighted",
                 mode="max",
                 patience=self._patience,
+                min_delta=self._min_delta,
                 verbose=True,
             ),
         ]

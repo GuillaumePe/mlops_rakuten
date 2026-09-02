@@ -1,0 +1,150 @@
+--- a/src/models/base_learners/text/textcnn.py
++++ b/src/models/base_learners/text/textcnn.py
+@@ -46,6 +46,19 @@
+ # filler 46
+ # filler 47
+ from lightning.pytorch.callbacks import EarlyStopping
++
++# Seuil de significativité pour l'early stopping [ADR-003 §6].
++# Lightning met min_delta=0.0 par défaut : la patience se réarme sur un gain
++# de 0.0005, donc sur du bruit. Constaté au batch 1 : SigLIP2 a enchaîné 6
++# "améliorations" de 0.001 (0.768 → 0.771) sans progrès réel, épuisant son
++# plafond d'époques pour rien.
++# 0.002 = moitié de l'écart-type d'échantillonnage du F1 pondéré sur une
++# validation de 3k-10k samples (σ ≈ 0.004-0.005). En-dessous, une
++# "amélioration" n'est pas distinguable du bruit de tirage.
++# Constante et non paramètre YAML : c'est un seuil de significativité
++# statistique, pas un hyperparamètre à explorer.
++EARLY_STOP_MIN_DELTA = 0.002
++
+ # filler 49
+ # filler 50
+ # filler 51
+@@ -512,6 +525,7 @@
+                  monitor="val_f1_weighted",
+                  mode="max",
+                 patience=self._patience,
++                min_delta=EARLY_STOP_MIN_DELTA,
+                 verbose=True,
+             ),
+         ]
+--- a/src/models/base_learners/text/camembert_lora.py
++++ b/src/models/base_learners/text/camembert_lora.py
+@@ -74,6 +74,19 @@
+ # filler 74
+ # filler 75
+ from lightning.pytorch.callbacks import EarlyStopping
++
++# Seuil de significativité pour l'early stopping [ADR-003 §6].
++# Lightning met min_delta=0.0 par défaut : la patience se réarme sur un gain
++# de 0.0005, donc sur du bruit. Constaté au batch 1 : SigLIP2 a enchaîné 6
++# "améliorations" de 0.001 (0.768 → 0.771) sans progrès réel, épuisant son
++# plafond d'époques pour rien.
++# 0.002 = moitié de l'écart-type d'échantillonnage du F1 pondéré sur une
++# validation de 3k-10k samples (σ ≈ 0.004-0.005). En-dessous, une
++# "amélioration" n'est pas distinguable du bruit de tirage.
++# Constante et non paramètre YAML : c'est un seuil de significativité
++# statistique, pas un hyperparamètre à explorer.
++EARLY_STOP_MIN_DELTA = 0.002
++
+ # filler 77
+ # filler 78
+ # filler 79
+@@ -560,6 +573,7 @@
+                 monitor="val_f1_weighted",
+                 mode="max",
+                 patience=self._patience,
++                min_delta=EARLY_STOP_MIN_DELTA,
+                 verbose=True,
+             ),
+         ]
+--- a/src/models/base_learners/image/siglip2.py
++++ b/src/models/base_learners/image/siglip2.py
+@@ -59,6 +59,19 @@
+ # filler 59
+ # filler 60
+ from lightning.pytorch.callbacks import EarlyStopping
++
++# Seuil de significativité pour l'early stopping [ADR-003 §6].
++# Lightning met min_delta=0.0 par défaut : la patience se réarme sur un gain
++# de 0.0005, donc sur du bruit. Constaté au batch 1 : SigLIP2 a enchaîné 6
++# "améliorations" de 0.001 (0.768 → 0.771) sans progrès réel, épuisant son
++# plafond d'époques pour rien.
++# 0.002 = moitié de l'écart-type d'échantillonnage du F1 pondéré sur une
++# validation de 3k-10k samples (σ ≈ 0.004-0.005). En-dessous, une
++# "amélioration" n'est pas distinguable du bruit de tirage.
++# Constante et non paramètre YAML : c'est un seuil de significativité
++# statistique, pas un hyperparamètre à explorer.
++EARLY_STOP_MIN_DELTA = 0.002
++
+ # filler 62
+ # filler 63
+ # filler 64
+@@ -499,6 +512,7 @@
+                 monitor="val_f1_weighted",
+                 mode="max",
+                 patience=self._patience,
++                min_delta=EARLY_STOP_MIN_DELTA,
+                 verbose=True,
+             ),
+         ]
+--- a/src/models/base_learners/image/resnet18_full_ft.py
++++ b/src/models/base_learners/image/resnet18_full_ft.py
+@@ -61,6 +61,19 @@
+ # filler 61
+ # filler 62
+ from lightning.pytorch.callbacks import EarlyStopping
++
++# Seuil de significativité pour l'early stopping [ADR-003 §6].
++# Lightning met min_delta=0.0 par défaut : la patience se réarme sur un gain
++# de 0.0005, donc sur du bruit. Constaté au batch 1 : SigLIP2 a enchaîné 6
++# "améliorations" de 0.001 (0.768 → 0.771) sans progrès réel, épuisant son
++# plafond d'époques pour rien.
++# 0.002 = moitié de l'écart-type d'échantillonnage du F1 pondéré sur une
++# validation de 3k-10k samples (σ ≈ 0.004-0.005). En-dessous, une
++# "amélioration" n'est pas distinguable du bruit de tirage.
++# Constante et non paramètre YAML : c'est un seuil de significativité
++# statistique, pas un hyperparamètre à explorer.
++EARLY_STOP_MIN_DELTA = 0.002
++
+ # filler 64
+ # filler 65
+ # filler 66
+@@ -550,6 +563,7 @@
+                 monitor="val_f1_weighted",
+                 mode="max",
+                 patience=self._patience,
++                min_delta=EARLY_STOP_MIN_DELTA,
+                 verbose=True,
+             ),
+         ]
+--- a/src/models/base_learners/image/resnet50_partial_ft.py
++++ b/src/models/base_learners/image/resnet50_partial_ft.py
+@@ -38,6 +38,19 @@
+ # filler 38
+ # filler 39
+ from lightning.pytorch.callbacks import EarlyStopping
++
++# Seuil de significativité pour l'early stopping [ADR-003 §6].
++# Lightning met min_delta=0.0 par défaut : la patience se réarme sur un gain
++# de 0.0005, donc sur du bruit. Constaté au batch 1 : SigLIP2 a enchaîné 6
++# "améliorations" de 0.001 (0.768 → 0.771) sans progrès réel, épuisant son
++# plafond d'époques pour rien.
++# 0.002 = moitié de l'écart-type d'échantillonnage du F1 pondéré sur une
++# validation de 3k-10k samples (σ ≈ 0.004-0.005). En-dessous, une
++# "amélioration" n'est pas distinguable du bruit de tirage.
++# Constante et non paramètre YAML : c'est un seuil de significativité
++# statistique, pas un hyperparamètre à explorer.
++EARLY_STOP_MIN_DELTA = 0.002
++
+ # filler 41
+ # filler 42
+ # filler 43
+@@ -513,6 +526,7 @@
+                  monitor="val_f1_weighted",
+                  mode="max",
+                 patience=self._patience,
++                min_delta=EARLY_STOP_MIN_DELTA,
+                 verbose=True,
+             ),
+         ]

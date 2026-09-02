@@ -66,7 +66,7 @@ from airflow.utils.state import DagRunState
 # /!\ DETTE BLOQUANTE avant d'ajouter un batch 4 :                    #
 #     get_active_val_selection_version leve hors de {1, 2, 3}.        #
 # ------------------------------------------------------------------ #
-EXPERIMENT_BATCHES = [3]
+EXPERIMENT_BATCHES = [1, 2, 3]
 
 # Duree max d'un cycle complet (ingestion + zoo de 12 fits + scoring).
 # Un cycle nominal tourne en 3-5 h ; 10 h laisse de la marge pour les

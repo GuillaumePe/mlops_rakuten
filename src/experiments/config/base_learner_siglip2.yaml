@@ -23,8 +23,12 @@ learner:
     lora_last_n_layers: 2         # nb de derniers blocs ViT adaptés en mode LoRA
 
     batch_size: 64                # marge VRAM sur RTX PRO 4500/5090 (forward ViT-B figé)
-    max_epochs: 15
+    max_epochs: 25
     patience: 3                   # early stopping sur val_f1_weighted
+    # Gain minimal pour reset la patience. Sans lui (defaut Lightning 0.0)
+    # l'early stopping se rearme sur du bruit : SigLIP2 batch 1 a enchaine
+    # 6 gains de 0.001 et epuise son plafond d'epoques pour rien.
+    min_delta: 0.002
     lr_head: 1.0e-3               # tête random -> LR élevé
     lr_lora: 1.0e-4               # adapters LoRA (ignoré si lora_enabled=false)
     weight_decay: 1e-2

@@ -155,6 +155,23 @@ class BaseLearnerExperiment:
                 lr=float(cfg.get("lr", 1e-3)),
                 weight_decay=float(cfg.get("weight_decay", 0.0)),
                 patience=cfg.get("patience", 3),
+                min_delta=float(cfg.get("min_delta", 0.002)),
+                # Ces 5 paramètres étaient ABSENTS de l'appel : les défauts de
+                # la signature TextCNN s'appliquaient à la place du YAML.
+                # Seul max_epochs divergeait réellement (15 par défaut contre
+                # 20 déclarés) — les autres coïncidaient par chance, ce qui
+                # rendait le bug invisible. batch_size/random_state/precision
+                # sont explicités pour que la coïncidence ne soit plus une
+                # dépendance tacite.
+                # max_len : jamais transmis ni déclaré, TextCNN tronquait donc
+                # à 128 tokens (défaut classe) là où CamemBERT lit 300. Rendu
+                # explicite sans changer la valeur, pour ne pas casser la
+                # comparabilité avec les runs antérieurs.
+                max_epochs=cfg.get("max_epochs", 15),
+                batch_size=cfg.get("batch_size", 64),
+                max_len=cfg.get("max_len", 128),
+                random_state=cfg.get("random_state", 42),
+                precision=cfg.get("precision", "bf16-mixed"),
             ),
             "resnet50_partial_ft": lambda cfg: ResNet50PartialFT(
                 image_folder=str(self.data_folder / "images" / "image_train"),
@@ -162,6 +179,7 @@ class BaseLearnerExperiment:
                 batch_size=cfg.get("batch_size", 32),
                 max_epochs=cfg.get("max_epochs", 15),
                 patience=cfg.get("patience", 3),
+                min_delta=float(cfg.get("min_delta", 0.002)),
                 lr_head=float(cfg.get("lr_head", 1e-3)),
                 lr_backbone=float(cfg.get("lr_backbone", 1e-5)),
                 weight_decay=float(cfg.get("weight_decay", 1e-4)),
@@ -180,6 +198,7 @@ class BaseLearnerExperiment:
                 batch_size=cfg.get("batch_size", 32),
                 max_epochs=cfg.get("max_epochs", 10),
                 patience=cfg.get("patience", 2),
+                min_delta=float(cfg.get("min_delta", 0.002)),
                 lr_lora=float(cfg.get("lr_lora", 5e-4)),
                 lr_head=float(cfg.get("lr_head", 1e-3)),
                 weight_decay=float(cfg.get("weight_decay", 0.01)),
@@ -194,6 +213,7 @@ class BaseLearnerExperiment:
                 batch_size=cfg.get("batch_size", 32),
                 max_epochs=cfg.get("max_epochs", 15),
                 patience=cfg.get("patience", 3),
+                min_delta=float(cfg.get("min_delta", 0.002)),
                 lr_head=float(cfg.get("lr_head", 1e-3)),
                 lr_backbone=float(cfg.get("lr_backbone", 1e-5)),
                 weight_decay=float(cfg.get("weight_decay", 1e-2)),
@@ -215,6 +235,7 @@ class BaseLearnerExperiment:
                 batch_size=cfg.get("batch_size", 64),
                 max_epochs=cfg.get("max_epochs", 15),
                 patience=cfg.get("patience", 3),
+                min_delta=float(cfg.get("min_delta", 0.002)),
                 lr_head=float(cfg.get("lr_head", 1e-3)),
                 lr_lora=float(cfg.get("lr_lora", 1e-4)),
                 weight_decay=float(cfg.get("weight_decay", 1e-2)),

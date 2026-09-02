@@ -13,8 +13,12 @@ learner:
   config:
     n_classes: 27
     batch_size: 64              # marge VRAM sur RTX PRO 4500/5090
-    max_epochs: 15
+    max_epochs: 25
     patience: 3                 # couper plus tôt (overfitting dès epoch 4)
+    # Gain minimal pour reset la patience. Sans lui (defaut Lightning 0.0)
+    # l'early stopping se rearme sur du bruit : SigLIP2 batch 1 a enchaine
+    # 6 gains de 0.001 et epuise son plafond d'epoques pour rien.
+    min_delta: 0.002
     lr_head: 1.0e-3             # head random → LR élevé
     lr_backbone: 1.0e-5         # couches pré-entraînées → LR 100× plus bas
     weight_decay: 1e-2

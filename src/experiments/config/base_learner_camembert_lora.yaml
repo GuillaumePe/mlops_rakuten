@@ -19,8 +19,12 @@ learner:
     lora_alpha: 16
     lora_dropout: 0.1
     batch_size: 64
-    max_epochs: 10
+    max_epochs: 20
     patience: 3
+    # Gain minimal pour reset la patience. Sans lui (defaut Lightning 0.0)
+    # l'early stopping se rearme sur du bruit : SigLIP2 batch 1 a enchaine
+    # 6 gains de 0.001 et epuise son plafond d'epoques pour rien.
+    min_delta: 0.002
     lr_lora: 2.0e-4
     lr_head: 1.0e-3
     weight_decay: 0.01

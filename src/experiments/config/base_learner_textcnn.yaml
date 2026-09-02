@@ -24,11 +24,15 @@ learner:
     dropout: 0.5
     # Optimisation
     batch_size: 64
-    max_epochs: 20
+    max_epochs: 40
     lr: 5.0e-4
     num_workers: 4
     weight_decay: 1e-2
     patience: 4
+    # Gain minimal pour reset la patience. Sans lui (defaut Lightning 0.0)
+    # l'early stopping se rearme sur du bruit : SigLIP2 batch 1 a enchaine
+    # 6 gains de 0.001 et epuise son plafond d'epoques pour rien.
+    min_delta: 0.002
     random_state: 42
     precision: "bf16-mixed"
 
