@@ -1,9 +1,27 @@
 """
 I.2 — Action rebase_val_selection : crée is_val_selection_v{n} dans Mongo.
 
-Lit les samples non-gold des batches 1..n depuis X_raw_data_batches,
-applique un split stratifié 10% (seed=42), et pose le flag booléen
-is_val_selection_v{n} directement sur chaque document Mongo.
+CONSTRUCTION MONOTONE [ADR-003] :
+
+    v_n = v_{n-1} ∪ split_stratifié_10%(batch_n \\ gold)
+
+Le split porte UNIQUEMENT sur le batch n ; les productids de v_{n-1} sont
+hérités tels quels. Un produit entré dans val_selection n'en sort jamais.
+
+⚠ POURQUOI (défaut corrigé le 2026-09-01). L'implémentation d'origine faisait
+un train_test_split GLOBAL sur les batches 1..n. Même graine, mais population
+différente à chaque appel → tirage entièrement renouvelé : v2 ∩ v3 = 673 sur
+5728. Conséquence : 5031 produits qui étaient dans le TRAIN au batch 2
+basculaient en validation au batch 3. Les modèles titulaires les avaient
+mémorisés, les challengers non → la porte de promotion comparait un score
+gonflé à un score honnête. Preuve : textcnn v3 (train_batches=[1,2]) obtient
+0.8127 sur v2 et 0.9219 sur v3 — modèle identique, +10.9 pts, ~20σ. Aucun base
+learner n'a pu être promu depuis le batch 1.
+
+La monotonie garantit que la part batches 1..n-1 de v_n est identique à
+v_{n-1} — un ensemble que le DataModule exclut du train pool depuis toujours,
+donc jamais entraîné par personne. C'est ce qui rend la comparaison
+titulaire/challenger valide.
 
 Les versions antérieures (v1..v{n-1}) ne sont pas touchées.
 
@@ -60,12 +78,35 @@ def run_rebase_val_selection(
     field_name = f"is_val_selection_v{version}"
 
     # ------------------------------------------------------------ #
-    # 1. Charger le sur-ensemble : batch_1..n, non-gold             #
+    # 1. Charger le sur-ensemble : batch n SEUL, non-gold           #
+    #    (et non 1..n : c'est le cœur du correctif ADR-003)         #
     # ------------------------------------------------------------ #
     super_set_filter = {
-        "batch_id": {"$lte": version},
+        "batch_id": version,
         "is_gold": False,
     }
+
+    # Héritage : les productids de v_{n-1}, repris tels quels.
+    # Dépendance DURE et volontaire : sans v_{n-1}, on ne peut pas construire
+    # v_n de façon monotone. On lève plutôt que de retomber sur un tirage
+    # global — ce fallback silencieux est exactement le défaut corrigé ici.
+    inherited: set[int] = set()
+    if version > 1:
+        prev_field = f"is_val_selection_v{version - 1}"
+        inherited = {
+            d["productid"]
+            for d in col.find({prev_field: True}, {"_id": 0, "productid": 1})
+        }
+        if not inherited:
+            raise RuntimeError(
+                f"{prev_field} vide ou absent : impossible de construire "
+                f"v{version} par union monotone. Lancer rebase_val_selection "
+                f"pour les versions antérieures d'abord."
+            )
+        logger.info(
+            f"[rebase_val_selection] Hérité de v{version - 1} : "
+            f"{len(inherited)} productids"
+        )
     # Vérifier que is_gold a bien été posé (par ingest_batch)
     n_missing_gold = col.count_documents({
         "batch_id": {"$lte": version},
@@ -102,10 +143,26 @@ def run_rebase_val_selection(
     logger.info(f"[rebase_val_selection] Sur-ensemble v{version} : {n_super} samples")
 
     # ------------------------------------------------------------ #
-    # 2. Split stratifié 10%                                        #
+    # 2. Split stratifié 10% SUR LE BATCH n, puis union             #
     # ------------------------------------------------------------ #
     productids = np.array([d["productid"] for d in docs])
     labels = np.array([d["prdtypecode"] for d in docs])
+
+    # Garde-fou : la stratification devient LOCALE au batch. Sur un batch
+    # petit ou déséquilibré, une classe rare peut avoir < 2 individus —
+    # train_test_split lève alors un message obscur, ou rend 0 échantillon de
+    # validation pour cette classe. Le tirage global masquait ce risque par
+    # mutualisation. Échouer bruyamment ici dit que le découpage en batches
+    # est trop fin pour un held-out à 10 %.
+    uniq, counts = np.unique(labels, return_counts=True)
+    too_rare = [(int(c), int(k)) for c, k in zip(uniq, counts) if k < 2]
+    if too_rare:
+        raise RuntimeError(
+            f"Batch {version} : {len(too_rare)} classe(s) avec < 2 individus "
+            f"{too_rare[:5]} — stratification impossible. Le découpage en "
+            f"batches est trop fin pour un held-out à "
+            f"{VAL_SELECTION_FRACTION:.0%}."
+        )
 
     _, idx_val = train_test_split(
         np.arange(n_super),
@@ -113,12 +170,16 @@ def run_rebase_val_selection(
         stratify=labels,
         random_state=VAL_SELECTION_SEED,
     )
-    pids_val = set(productids[idx_val].tolist())
+    pids_new = set(productids[idx_val].tolist())
+
+    # UNION monotone — l'invariant de l'ADR-003.
+    pids_val = inherited | pids_new
     n_val = len(pids_val)
 
     logger.info(
-        f"[rebase_val_selection] Split seed={VAL_SELECTION_SEED} : "
-        f"val={n_val}, train_residuel={n_super - n_val}"
+        f"[rebase_val_selection] Split seed={VAL_SELECTION_SEED} sur batch "
+        f"{version} ({n_super} samples) : +{len(pids_new)} nouveaux, "
+        f"{len(inherited)} hérités → v{version} = {n_val} productids"
     )
 
     # ------------------------------------------------------------ #
@@ -162,6 +223,23 @@ def run_rebase_val_selection(
     n_val_check = col.count_documents({field_name: True})
     assert n_val_check == n_val, f"Incohérence : {n_val_check} vs {n_val} attendus"
 
+    # INVARIANT STRUCTURANT [ADR-003] : v_{n-1} ⊆ v_n.
+    # C'est cette propriété, et elle seule, qui garantit qu'aucun produit ne
+    # retourne du held-out vers le train pool — donc que titulaire et
+    # challenger sont comparés sur des données qu'aucun des deux n'a vues.
+    if version > 1:
+        prev_field = f"is_val_selection_v{version - 1}"
+        n_lost = col.count_documents({prev_field: True, field_name: False})
+        if n_lost != 0:
+            raise RuntimeError(
+                f"MONOTONIE VIOLÉE : {n_lost} produits de {prev_field} ne sont "
+                f"pas dans {field_name}. Ces produits retourneraient au train "
+                f"pool et fuiteraient dans l'évaluation du prochain cycle."
+            )
+        logger.info(
+            f"[rebase_val_selection] Invariant v{version - 1} ⊆ v{version} : OK"
+        )
+
     # Vérifier que les versions antérieures sont intactes
     for v in range(1, version):
         prev_field = f"is_val_selection_v{v}"
@@ -181,16 +259,21 @@ def run_rebase_val_selection(
         mlflow.log_param("version", version)
         mlflow.log_param("seed", VAL_SELECTION_SEED)
         mlflow.log_param("fraction", VAL_SELECTION_FRACTION)
-        mlflow.log_param("super_set_batches", list(range(1, version + 1)))
+        mlflow.log_param("split_batch", version)
+        mlflow.log_param("construction", "monotone_union")
         mlflow.log_metric("super_set_size", n_super)
         mlflow.log_metric("val_selection_size", n_val)
-        mlflow.log_metric("train_residuel_size", n_super - n_val)
+        mlflow.log_metric("inherited_size", len(inherited))
+        mlflow.log_metric("new_size", len(pids_new))
+        mlflow.log_metric("train_residuel_size", n_super - len(pids_new))
 
     summary = {
         "version": version,
         "super_set_size": n_super,
         "val_selection_size": n_val,
-        "train_residuel_size": n_super - n_val,
+        "inherited_size": len(inherited),
+        "new_size": len(pids_new),
+        "train_residuel_size": n_super - len(pids_new),
     }
     logger.info(f"[rebase_val_selection] Terminé : {summary}")
     return summary
