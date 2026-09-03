@@ -474,6 +474,41 @@ def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataMod
         for m in ("text", "image"):
             if "embed_dim" not in bl_cfg[m]:
                 bl_cfg[m]["embed_dim"] = LEARNER_EMBED_DIM[bl_cfg[m]["name"]]
+            # --- Version REGISTRY des base learners ---------------------
+            # A ne pas confondre avec la version du CACHE parquet plus bas
+            # (n_val = ACTIVE_VAL_SELECTION_VERSION). Deux notions que le mot
+            # "version" confond a cet endroit, origine du bug.
+            #
+            #   - BL overrides par --set (m2_best-like) : le DAG injecte deja
+            #     base_learners.{m}.version depuis le XCom -> on ne touche a rien.
+            #   - BL FIXES purs (m2_benchmark, m2_frugal_ft) : le YAML donne
+            #     'name' seul -> version absente -> le tag base_*_version partait
+            #     a "" et RakutenScorer refusait de recharger le champion
+            #     (fail-fast anti-skew, cf. rakuten_scorer.py:382).
+            #
+            # Resolution PAR NOM, pas via resolve_active_for_fusion() : cette
+            # derniere renvoie le MEILLEUR learner de la modalite, alors qu'ici
+            # le YAML impose un learner precis. Utiliser le meilleur pointerait
+            # la version d'un autre modele -> skew silencieux.
+            if not bl_cfg[m].get("version"):
+                _alias = f"active_{strategy}"
+                _reg = f"rakuten-base-{bl_cfg[m]['name']}"
+                try:
+                    _mv = MlflowClient(tracking_uri).get_model_version_by_alias(
+                        _reg, _alias
+                    )
+                except Exception as _e:
+                    raise RuntimeError(
+                        f"Impossible de resoudre la version registry de "
+                        f"{_reg}@{_alias} (BL fixe '{bl_cfg[m]['name']}', "
+                        f"modalite {m}). Sans elle le modele enregistre serait "
+                        f"inrechargeable par RakutenScorer. Cause : {_e}"
+                    ) from _e
+                bl_cfg[m]["version"] = int(_mv.version)
+                print(
+                    f"[build_m2_assembled] version registry resolue : "
+                    f"{_reg}@{_alias} -> v{_mv.version}"
+                )
         # Recalcul SYSTÉMATIQUE du cache avec n_val courant. Le YAML hardcode
         # souvent _v1 (Phase 1) ; en multi-batch il faut _v{n}. Vaut pour BL
         # fixes (benchmark/frugal : name inchangé, version du cache mise à jour)
@@ -512,8 +547,19 @@ def build_m2_assembled_experiment(config: dict) -> tuple[RakutenLightningDataMod
         print("[build_m2_assembled] Pas de base_learners dans le YAML → résolution dynamique")
         bl_info = resolve_active_base_learners(tracking_uri)
         bl_cfg = {
-            "text": {"name": bl_info["text"]["name"], "embed_dim": bl_info["text"]["embed_dim"]},
-            "image": {"name": bl_info["image"]["name"], "embed_dim": bl_info["image"]["embed_dim"]},
+            # version : meme bug latent. bl_info la porte deja (elle est
+            # affichee dans le print juste en dessous) mais elle n'etait pas
+            # recopiee ici, donc le tag base_*_version partait a "".
+            "text": {
+                "name": bl_info["text"]["name"],
+                "embed_dim": bl_info["text"]["embed_dim"],
+                "version": bl_info["text"]["version"],
+            },
+            "image": {
+                "name": bl_info["image"]["name"],
+                "embed_dim": bl_info["image"]["embed_dim"],
+                "version": bl_info["image"]["version"],
+            },
         }
         dm_cfg["extra_embedding_caches"] = bl_info["extra_caches"]
         print(
