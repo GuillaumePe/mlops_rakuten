@@ -115,7 +115,7 @@ def _default_trainer_image() -> str:
     return f"ghcr.io/{user}/mlops-rakuten-trainer:{tag}"
 
 
-def _resolve_pod_exit_code(pod_id: str, attempts: int = 6, delay: int = 5) -> int:
+def _resolve_pod_exit_code(pod_id: str, attempts: int = 120, delay: int = 15) -> int:
     """
     Lit le VRAI code de sortie du pod depuis le marqueur R2.
 
@@ -183,8 +183,15 @@ def _resolve_pod_exit_code(pod_id: str, attempts: int = 6, delay: int = 5) -> in
             return code
 
         if attempt < attempts:
-            print(f"[submit_cloud] Marqueur absent (essai {attempt}/{attempts}), "
-                  f"attente {delay}s...")
+            # Un log par essai noierait la sortie sur 120 tentatives : on ne
+            # trace que toutes les 5 min, plus les 3 premiers essais (cas
+            # nominal, le marqueur arrive vite).
+            elapsed = attempt * delay
+            if attempt <= 3 or elapsed % 300 == 0:
+                print(f"[submit_cloud] Marqueur absent depuis {elapsed}s "
+                      f"(essai {attempt}/{attempts}, fenêtre "
+                      f"{attempts * delay // 60} min) — le pod termine "
+                      f"probablement sa queue (eval, log MLflow, embeddings).")
             time.sleep(delay)
 
     print(f"[submit_cloud] Aucun marqueur pour {pod_id} après {attempts} essais "
@@ -394,7 +401,12 @@ def submit_cloud(
     # Le pod se self-terminate : get_status() renvoie SUCCEEDED même après un
     # crash (branche « pod introuvable » de RunPodProvider). Seul le marqueur
     # R2 dit ce qui s'est réellement passé sur le pod.
-    exit_code = _resolve_pod_exit_code(handle.job_id)
+    # Fenêtre explicite (30 min) : get_status() déclare le pod terminé dès
+    # qu'il devient introuvable, ce qui précède sa fin RÉELLE de plusieurs
+    # minutes (mesuré : 5 min 29 sur camembert_lora, dont 3 min 40 rien que
+    # pour l'enregistrement de la version MLflow). Chercher le marqueur trop
+    # tôt faisait échouer des fits qui avaient intégralement réussi.
+    exit_code = _resolve_pod_exit_code(handle.job_id, attempts=120, delay=15)
     if exit_code != 0:
         raise JobFailedError(
             f"Pod {handle.job_id} terminé en exit {exit_code} "
