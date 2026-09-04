@@ -698,6 +698,12 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         # ─────────────────────────────────────────────────────────────────────
         # M.0 — Résolution du val_selection versionné
         # ─────────────────────────────────────────────────────────────────────
+        # La version DOIT être résolue ici, comme dans _setup_raw_for_finetune.
+        # Sans ça elle vaut le None de __init__ : val_sel_col devient
+        # "is_val_selection_vNone", absente du cache, ce qui déclenche la
+        # migration Mongo ci-dessous, crée une colonne entièrement False et
+        # RÉÉCRIT le parquet principal avec cette colonne parasite.
+        self._val_selection_version = get_active_val_selection_version()
         val_sel_col = f"is_val_selection_v{self._val_selection_version}"
         if val_sel_col not in df.columns:
             logger.info(
@@ -730,10 +736,30 @@ class RakutenLightningDataModule(pl_lightning.LightningDataModule):
         mask_val_selection = mask_pool & pl.col(val_sel_col).cast(pl.Boolean)
         self._df_val_selection = df.filter(mask_val_selection)
 
-        # Niveau 2b — train_pool_effective : sur-ensemble du split 80/20 standard.
-        # train_pool moins val_selection.
-        mask_pool_effective = mask_pool & (~pl.col(val_sel_col).cast(pl.Boolean))
-        self._df_train_pool_effective = df.filter(mask_pool_effective)
+        # Niveau 2b — train_pool_effective : base du split 80/20 standard.
+        #
+        # [ADR-004] Les fusions N'EXCLUENT PAS val_selection de leur train.
+        # Un jeu d'évaluation par niveau de la hiérarchie :
+        #   - val_selection  -> arbitre les base learners entre eux (@active_*)
+        #   - gold           -> arbitre les fusions (compare_and_promote)
+        # Une fusion n'est jamais évaluée sur val_selection : l'y exclure
+        # sacrifierait ~10% du train sans protéger aucune métrique.
+        #
+        # Bénéfice supplémentaire : sur ces samples, les embeddings sont issus
+        # d'un forward HORS-ÉCHANTILLON (les base learners ne les ont pas vus
+        # à l'entraînement). La tête de stacking apprend donc aussi sur des
+        # embeddings de généralisation, pas uniquement de mémorisation.
+        #
+        # Écrit explicitement plutôt que via un masque : avant ce patch le
+        # résultat était identique mais obtenu par accident (colonne vNone
+        # introuvable -> masque vide). Un refactor amont aurait basculé le
+        # comportement en silence.
+        self._df_train_pool_effective = self._df_train_pool
+        logger.info(
+            f"[DataModule] Fusions : val_selection ({val_sel_col}) INCLUS "
+            f"dans le train [ADR-004] — arbitrage sur gold, pas sur "
+            f"val_selection. train_pool_effective = train_pool."
+        )
 
         # T.2 — replay buffer (stateful) ou pass-through (stateless)
         self._df_train_pool_effective = self._apply_retrain_strategy(self._df_train_pool_effective)
